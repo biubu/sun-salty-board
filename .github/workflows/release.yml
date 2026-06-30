@@ -17,13 +17,16 @@ jobs:
         include:
           - os: ubuntu-latest
             build-command: build:linux
-            asset-name: SunSaltyBoard-*-x86_64.AppImage
+            asset-pattern: sunsaltyboard-*.AppImage
+            artifact-name: sunsaltyboard-linux
           - os: macos-latest
             build-command: build:mac
-            asset-name: SunSaltyBoard-*-x64.dmg
+            asset-pattern: sunsaltyboard-*.dmg
+            artifact-name: sunsaltyboard-macos
           - os: windows-latest
             build-command: build:win
-            asset-name: SunSaltyBoard-setup-*.exe
+            asset-pattern: sunsaltyboard-setup-*.exe
+            artifact-name: sunsaltyboard-windows
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -48,9 +51,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm run ${{ matrix.build-command }} -- --publish always
 
-      - name: Upload artifact
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset-name }}
-          path: release/${{ matrix.asset-name }}
-          if-no-files-found: warn
+          name: ${{ matrix.artifact-name }}
+          path: release/
+          if-no-files-found: ignore
