@@ -17,18 +17,33 @@ const svgIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512
 
 writeFileSync(join(resourcesDir, 'icon.svg'), svgIcon)
 
+function createIco(pngData) {
+  const buf = Buffer.alloc(22 + pngData.length)
+  buf.writeUInt16LE(0, 0)    // reserved
+  buf.writeUInt16LE(1, 2)    // ICO type
+  buf.writeUInt16LE(1, 4)    // count
+  buf.writeUInt8(0, 6)       // width (0=256)
+  buf.writeUInt8(0, 7)       // height (0=256)
+  buf.writeUInt8(0, 8)       // color count
+  buf.writeUInt8(0, 9)       // reserved
+  buf.writeUInt16LE(1, 10)   // planes
+  buf.writeUInt16LE(32, 12)  // bpp
+  buf.writeUInt32LE(pngData.length, 14) // image size
+  buf.writeUInt32LE(22, 18)  // offset
+  pngData.copy(buf, 22)      // PNG data
+  return buf
+}
+
 async function main() {
   try {
     const sharp = require('sharp')
-    const img = sharp(Buffer.from(svgIcon)).resize(256, 256).png()
-    const buf = await img.toBuffer()
-    writeFileSync(join(resourcesDir, 'icon.png'), buf)
-    writeFileSync(join(resourcesDir, 'icon.ico'), buf)
+    const png512 = await sharp(Buffer.from(svgIcon)).resize(512, 512).png().toBuffer()
+    writeFileSync(join(resourcesDir, 'icon.png'), png512)
+    const ico = createIco(png512)
+    writeFileSync(join(resourcesDir, 'icon.ico'), ico)
     console.log('Icons generated successfully')
   } catch (e) {
     console.log('sharp not available, SVG icon created at resources/icon.svg')
-    writeFileSync(join(resourcesDir, 'icon.png'), Buffer.alloc(0))
-    writeFileSync(join(resourcesDir, 'icon.ico'), Buffer.alloc(0))
   }
 }
 
