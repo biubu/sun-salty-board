@@ -18,6 +18,20 @@ let tray: Tray | null = null
 let workerBridge: WorkerBridge | null = null
 
 const isDev = !app.isPackaged
+let isQuitting = false
+
+const gotTheLock = app.requestSingleInstanceLock()
+if (!gotTheLock) {
+  app.quit()
+}
+
+app.on('second-instance', () => {
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.show()
+    mainWindow.focus()
+  }
+})
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -44,7 +58,7 @@ function createWindow(): void {
   mainWindow.on('blur', () => mainWindow?.hide())
 
   mainWindow.on('close', (e) => {
-    if (!(app as any).isQuitting) {
+    if (!isQuitting) {
       e.preventDefault()
       mainWindow?.hide()
     }
@@ -84,7 +98,7 @@ function createTray(): void {
     {
       label: 'Quit',
       click: () => {
-        ;(app as any).isQuitting = true
+        isQuitting = true
         app.quit()
       },
     },
@@ -319,6 +333,16 @@ app.on('ready', async () => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
+})
+
+app.on('activate', () => {
+  if (mainWindow) {
+    if (mainWindow.isVisible()) {
+      mainWindow.hide()
+    } else {
+      toggleWindow()
+    }
+  }
 })
 
 app.on('will-quit', () => {

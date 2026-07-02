@@ -25,6 +25,8 @@ mac:
         - arm64
   artifactName: ${name}-${version}-${arch}.${ext}
   category: public.app-category.utilities
+  extendInfo:
+    LSUIElement: true
 linux:
   target:
     - target: AppImage
