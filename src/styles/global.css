@@ -145,6 +145,11 @@ body {
   background: var(--bg-secondary);
 }
 
+.history-item.active {
+  background: var(--bg-tertiary);
+  border-left: 3px solid var(--accent);
+}
+
 .history-item.undo-bar {
   justify-content: space-between;
   align-items: center;

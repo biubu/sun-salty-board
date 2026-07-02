@@ -2,6 +2,7 @@ import {
   app, BrowserWindow, ipcMain, Tray, Menu,
   globalShortcut, nativeImage, clipboard, screen,
 } from 'electron'
+import { execFile } from 'child_process'
 import path from 'path'
 import { createWorker, WorkerBridge } from './worker'
 import {
@@ -121,6 +122,22 @@ function sendHistoryUpdate(): void {
   mainWindow?.webContents.send('history-update', workerBridge?.getItems() ?? [])
 }
 
+function simulatePaste(): void {
+  if (process.platform === 'darwin') {
+    execFile('osascript', ['-e', 'tell application "System Events" to keystroke "v" using command down'], (err) => {
+      if (err) console.warn('[SunSaltyBoard] Failed to simulate paste:', err.message)
+    })
+  } else if (process.platform === 'win32') {
+    execFile('powershell', ['-Command', 'Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait("^v")'], (err) => {
+      if (err) console.warn('[SunSaltyBoard] Failed to simulate paste:', err.message)
+    })
+  } else {
+    execFile('xdotool', ['key', 'ctrl+v'], (err) => {
+      if (err) console.warn('[SunSaltyBoard] Failed to simulate paste:', err.message)
+    })
+  }
+}
+
 function onClipboardEvent(event: {
   content: string
   contentHtml?: string
@@ -143,6 +160,7 @@ function onClipboardEvent(event: {
     filePaths: event.filePaths,
     sourceApp: event.sourceApp,
   })
+  sendHistoryUpdate()
 
   const settings = workerBridge?.getSettings()
   if (settings?.syncEnabled) {
@@ -209,6 +227,7 @@ app.on('ready', async () => {
       }
     }
     mainWindow?.hide()
+    setTimeout(simulatePaste, 80)
   })
 
   ipcMain.on('paste-by-index', (_e, index: number) => {
@@ -221,6 +240,7 @@ app.on('ready', async () => {
         clipboard.writeText(item.content)
       }
       mainWindow?.hide()
+      setTimeout(simulatePaste, 80)
     }
   })
 

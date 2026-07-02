@@ -3,12 +3,13 @@ import { ClipboardItem } from '../App'
 
 type HistoryItemProps = {
   item: ClipboardItem
+  isActive: boolean
   onSelect: (item: ClipboardItem) => void
   onDelete: (id: number) => void
   onToggleFavorite: (id: number) => void
 }
 
-export default function HistoryItem({ item, onSelect, onDelete, onToggleFavorite }: HistoryItemProps) {
+export default function HistoryItem({ item, isActive, onSelect, onDelete, onToggleFavorite }: HistoryItemProps) {
   const [showUndo, setShowUndo] = useState(false)
   const [deletedId, setDeletedId] = useState<number | null>(null)
 
@@ -64,7 +65,7 @@ export default function HistoryItem({ item, onSelect, onDelete, onToggleFavorite
   }
 
   return (
-    <div className="history-item" onClick={() => onSelect(item)}>
+    <div className={`history-item${isActive ? ' active' : ''}`} onClick={() => onSelect(item)}>
       <div className="history-item-content">
         {item.dataType === 'image' && imageSrc ? (
           <img className="history-item-image" src={imageSrc} alt="Clipboard" />

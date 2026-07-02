@@ -6,6 +6,7 @@ import HistoryItem from './HistoryItem'
 
 type HistoryPanelProps = {
   items: ClipboardItem[]
+  selectedIndex: number
   onSelect: (item: ClipboardItem) => void
   onDelete: (id: number) => void
   onToggleFavorite: (id: number) => void
@@ -13,7 +14,7 @@ type HistoryPanelProps = {
 
 const ITEM_HEIGHT = 80
 
-export default function HistoryPanel({ items, onSelect, onDelete, onToggleFavorite }: HistoryPanelProps) {
+export default function HistoryPanel({ items, selectedIndex, onSelect, onDelete, onToggleFavorite }: HistoryPanelProps) {
   const Row = useCallback(
     ({ index, style }: { index: number; style: React.CSSProperties }) => {
       const item = items[index]
@@ -21,6 +22,7 @@ export default function HistoryPanel({ items, onSelect, onDelete, onToggleFavori
         <div style={style}>
           <HistoryItem
             item={item}
+            isActive={index === selectedIndex}
             onSelect={onSelect}
             onDelete={onDelete}
             onToggleFavorite={onToggleFavorite}

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import HistoryPanel from './components/HistoryPanel'
 import SearchBar from './components/SearchBar'
 import FilterChips from './components/FilterChips'
@@ -25,23 +25,16 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('')
   const [activeFilter, setActiveFilter] = useState<FilterType>('all')
   const [selectedCategoryId, setSelectedCategoryId] = useState<number | null>(null)
+  const [selectedIndex, setSelectedIndex] = useState(0)
   const [showSettings, setShowSettings] = useState(false)
+  const selectedIndexRef = useRef(selectedIndex)
+  selectedIndexRef.current = selectedIndex
 
   useEffect(() => {
     window.electronAPI.getHistory().then(setItems)
     const unsub1 = window.electronAPI.onHistoryUpdate(setItems)
     const unsub2 = window.electronAPI.onOpenSettings(() => setShowSettings(true))
     return () => { unsub1(); unsub2() }
-  }, [])
-
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key >= '1' && e.key <= '9') {
-        window.electronAPI.pasteByIndex(parseInt(e.key, 10))
-      }
-    }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
   }, [])
 
   const filteredItems = useMemo(() => {
@@ -61,6 +54,30 @@ export default function App() {
     return result
   }, [items, searchQuery, activeFilter, selectedCategoryId])
 
+  const filteredRef = useRef(filteredItems)
+  filteredRef.current = filteredItems
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.target as HTMLElement).tagName === 'INPUT') return
+      if (e.key >= '1' && e.key <= '9') {
+        window.electronAPI.pasteByIndex(parseInt(e.key, 10))
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setSelectedIndex((i) => (i > 0 ? i - 1 : filteredRef.current.length - 1))
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setSelectedIndex((i) => (i < filteredRef.current.length - 1 ? i + 1 : 0))
+      } else if (e.key === 'Enter') {
+        e.preventDefault()
+        const item = filteredRef.current[selectedIndexRef.current]
+        if (item) window.electronAPI.pasteItem(item.id)
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [])
+
   if (showSettings) {
     return <SettingsPanel onClose={() => setShowSettings(false)} />
   }
@@ -79,6 +96,7 @@ export default function App() {
       <main className="app-main">
         <HistoryPanel
           items={filteredItems}
+          selectedIndex={selectedIndex}
           onSelect={(item) => window.electronAPI.pasteItem(item.id)}
           onDelete={(id) => {
             window.electronAPI.deleteItem(id)
