@@ -162,10 +162,10 @@ function onSyncReceive(msg: {
   sendHistoryUpdate()
 }
 
-app.on('ready', () => {
-  workerBridge = createWorker()
+app.on('ready', async () => {
+  workerBridge = await createWorker()
 
-    const settings = workerBridge.getSettings()
+  const settings = workerBridge.getSettings()
   registerHotkey(settings.hotkey)
 
   if (!isDev) {
@@ -174,16 +174,6 @@ app.on('ready', () => {
 
   if (settings.exclusionApps?.length) setExclusionApps(settings.exclusionApps)
   if (settings.exclusionPatterns?.length) setExclusionPatterns(settings.exclusionPatterns)
-
-  createWindow()
-  createTray()
-
-  startMonitoring(onClipboardEvent, 500)
-
-  if (settings.syncEnabled) {
-    setDeviceName(app.getName())
-    startSync(onSyncReceive)
-  }
 
   ipcMain.on('get-history', () => {
     sendHistoryUpdate()
@@ -315,6 +305,16 @@ app.on('ready', () => {
   ipcMain.handle('get-sync-peers', () => {
     return getPeers()
   })
+
+  createWindow()
+  createTray()
+
+  startMonitoring(onClipboardEvent, 500)
+
+  if (settings.syncEnabled) {
+    setDeviceName(app.getName())
+    startSync(onSyncReceive)
+  }
 })
 
 app.on('window-all-closed', () => {

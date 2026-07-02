@@ -53,11 +53,36 @@ function isDuplicate(): boolean {
   return false
 }
 
+function readFileListFromClipboard(): string[] {
+  const formats = clipboard.availableFormats()
+  const fileFormats = formats.filter(f =>
+    f.includes('FileName') || f.includes('public.file-url') || f === 'NSFilenamesPboardType',
+  )
+  if (fileFormats.length === 0) return []
+  const paths: string[] = []
+  for (const fmt of fileFormats) {
+    try {
+      const buf = clipboard.readBuffer(fmt)
+      if (!buf) continue
+      const str = buf.toString('utf8')
+      if (fmt === 'public.file-url') {
+        const urls = str.split('\n').filter(Boolean)
+        for (const url of urls) {
+          try { paths.push(decodeURIComponent(url.replace(/^file:\/\//, ''))) } catch {}
+        }
+      } else if (fmt.startsWith('FileName')) {
+        paths.push(str.replace(/\0/g, ''))
+      }
+    } catch {}
+  }
+  return [...new Set(paths)]
+}
+
 function poll(): void {
   const currentText = clipboard.readText()
   const currentHtml = clipboard.readHTML()
   const currentImage = clipboard.readImage()
-  const currentFiles = clipboard.readFileList()
+  const currentFiles = readFileListFromClipboard()
 
   if (isDuplicate()) return
 
@@ -121,7 +146,7 @@ export function startMonitoring(
   lastHtml = clipboard.readHTML()
   const img = clipboard.readImage()
   lastImageBuf = img.isEmpty() ? null : img.toPNG()
-  lastFiles = clipboard.readFileList()
+  lastFiles = readFileListFromClipboard()
 
   pollingTimer = setInterval(poll, pollingInterval)
 }

@@ -1,7 +1,8 @@
-import initSqlJs, { Database as SqlJsDatabase } from 'sql.js'
+import initSqlJs from 'sql.js'
 import path from 'path'
 import fs from 'fs'
 import { app } from 'electron'
+import type { Database as SqlJsDatabase } from 'sql.js'
 import { createFtsTable, indexItemFts, removeItemFts, searchFts } from './ftsSearch'
 import { prepareUndo, consumeUndo } from './undoManager'
 import { addSensitiveItem, getSensitiveItems, getSensitiveItemById, removeSensitiveItem, clearSensitiveItems } from './sensitiveItems'
@@ -44,15 +45,17 @@ function saveDb(): void {
   fs.writeFileSync(dbPath, buffer)
 }
 
-function initDatabase(): void {
+async function initDatabase(): Promise<void> {
   const userDataPath = app.getPath('userData')
   dbPath = path.join(userDataPath, 'sunsaltyboard.db')
 
+  const SQL = await initSqlJs()
+
   if (fs.existsSync(dbPath)) {
     const fileBuffer = fs.readFileSync(dbPath)
-    db = new (require('sql.js').Database)(fileBuffer)
+    db = new SQL.Database(fileBuffer)
   } else {
-    db = new (require('sql.js').Database)()
+    db = new SQL.Database()
   }
 
   db.run(`
@@ -483,8 +486,8 @@ export interface WorkerBridge {
   close: () => void
 }
 
-export function createWorker(): WorkerBridge {
-  initDatabase()
+export async function createWorker(): Promise<WorkerBridge> {
+  await initDatabase()
 
   return {
     storeItem: queueItem,
