@@ -85,8 +85,11 @@ function toggleWindow(): void {
 }
 
 function createTray(): void {
-  const iconPath = path.join(__dirname, isDev ? '../resources/icon.png' : '../resources/icon.png')
+  const iconPath = path.join(__dirname, '../resources/icon.png')
   const icon = nativeImage.createFromPath(iconPath).resize({ width: 22, height: 22 })
+  if (process.platform === 'darwin') {
+    icon.setTemplateImage(true)
+  }
   tray = new Tray(icon)
   tray.setToolTip('SunSaltyBoard')
   tray.setContextMenu(Menu.buildFromTemplate([

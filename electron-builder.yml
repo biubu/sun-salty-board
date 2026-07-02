@@ -6,6 +6,7 @@ directories:
 files:
   - dist/**/*
   - dist-electron/**/*
+  - resources/**/*
   - package.json
 win:
   target:
@@ -25,8 +26,6 @@ mac:
         - arm64
   artifactName: ${name}-${version}-${arch}.${ext}
   category: public.app-category.utilities
-  extendInfo:
-    LSUIElement: true
 linux:
   target:
     - target: AppImage
