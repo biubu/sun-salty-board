@@ -27,7 +27,7 @@ function createWindow(): void {
     alwaysOnTop: true,
     skipTaskbar: true,
     resizable: true,
-    show: false,
+    show: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -71,7 +71,8 @@ function toggleWindow(): void {
 }
 
 function createTray(): void {
-  const icon = nativeImage.createEmpty()
+  const iconPath = path.join(__dirname, isDev ? '../resources/icon.png' : '../resources/icon.png')
+  const icon = nativeImage.createFromPath(iconPath).resize({ width: 22, height: 22 })
   tray = new Tray(icon)
   tray.setToolTip('SunSaltyBoard')
   tray.setContextMenu(Menu.buildFromTemplate([
@@ -167,10 +168,6 @@ app.on('ready', async () => {
 
   const settings = workerBridge.getSettings()
   registerHotkey(settings.hotkey)
-
-  if (!isDev) {
-    setupAutoUpdater(mainWindow)
-  }
 
   if (settings.exclusionApps?.length) setExclusionApps(settings.exclusionApps)
   if (settings.exclusionPatterns?.length) setExclusionPatterns(settings.exclusionPatterns)
@@ -307,6 +304,9 @@ app.on('ready', async () => {
   })
 
   createWindow()
+  if (!isDev) {
+    setupAutoUpdater(mainWindow)
+  }
   createTray()
 
   startMonitoring(onClipboardEvent, 500)
