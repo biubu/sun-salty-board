@@ -36,5 +36,6 @@ publish:
   provider: github
   owner: biubu
   repo: sun-salty-board
+  releaseType: release
 extraMetadata:
   main: dist-electron/main.js
