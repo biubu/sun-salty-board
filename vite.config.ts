@@ -17,9 +17,6 @@ export default defineConfig({
               external: [
                 'better-sqlite3',
                 'electron-global-shortcut',
-                'multicast-dns',
-                'sql.js',
-                'ws',
               ],
             },
           },
@@ -37,9 +34,6 @@ export default defineConfig({
               external: [
                 'better-sqlite3',
                 'electron-global-shortcut',
-                'multicast-dns',
-                'sql.js',
-                'ws',
               ],
             },
           },

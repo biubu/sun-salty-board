@@ -1,13 +1,12 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import initSqlJs from 'sql.js'
+import Database from 'better-sqlite3'
 
-let db: any
+let db: Database.Database
 
-beforeAll(async () => {
-  const SQL = await initSqlJs()
-  db = new SQL.Database()
-  db.run(`
-    CREATE TABLE IF NOT EXISTS items (
+beforeAll(() => {
+  db = new Database(':memory:')
+  db.exec(`
+    CREATE TABLE items (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       content TEXT NOT NULL DEFAULT '',
       content_html TEXT,
@@ -19,7 +18,7 @@ beforeAll(async () => {
       is_favorite INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
     );
-    CREATE TABLE IF NOT EXISTS item_categories (
+    CREATE TABLE item_categories (
       item_id INTEGER NOT NULL,
       category_id INTEGER NOT NULL,
       PRIMARY KEY (item_id, category_id)
@@ -33,55 +32,44 @@ afterAll(() => {
 
 describe('Storage Layer', () => {
   it('should insert items', () => {
-    db.run(
-      'INSERT INTO items (content, data_type) VALUES (?, ?)',
-      ['test text', 'text'],
-    )
-    const result = db.exec('SELECT COUNT(*) as cnt FROM items')
-    expect((result[0].values[0][0] as number)).toBeGreaterThan(0)
+    db.prepare('INSERT INTO items (content, data_type) VALUES (?, ?)').run('test text', 'text')
+    const { cnt } = db.prepare('SELECT COUNT(*) AS cnt FROM items').get() as { cnt: number }
+    expect(cnt).toBeGreaterThan(0)
   })
 
   it('should query items with ordering', () => {
-    const result = db.exec('SELECT * FROM items ORDER BY created_at DESC')
-    expect(result.length).toBeGreaterThan(0)
+    const rows = db.prepare('SELECT * FROM items ORDER BY created_at DESC').all()
+    expect(rows.length).toBeGreaterThan(0)
   })
 
   it('should delete items', () => {
-    db.run('DELETE FROM items WHERE content = ?', ['test text'])
-    const result = db.exec("SELECT COUNT(*) as cnt FROM items WHERE content = 'test text'")
-    expect((result[0].values[0][0] as number)).toBe(0)
+    db.prepare('DELETE FROM items WHERE content = ?').run('test text')
+    const { cnt } = db.prepare("SELECT COUNT(*) AS cnt FROM items WHERE content = 'test text'").get() as { cnt: number }
+    expect(cnt).toBe(0)
   })
 
   it('should trim old non-favorited items', () => {
-    db.run('INSERT INTO items (content, data_type, is_favorite) VALUES (?, ?, ?)', ['old1', 'text', 0])
-    db.run('INSERT INTO items (content, data_type, is_favorite) VALUES (?, ?, ?)', ['old2', 'text', 0])
-    db.run('INSERT INTO items (content, data_type, is_favorite) VALUES (?, ?, ?)', ['fav', 'text', 1])
+    db.prepare('INSERT INTO items (content, data_type, is_favorite) VALUES (?, ?, ?)').run('old1', 'text', 0)
+    db.prepare('INSERT INTO items (content, data_type, is_favorite) VALUES (?, ?, ?)').run('old2', 'text', 0)
+    db.prepare('INSERT INTO items (content, data_type, is_favorite) VALUES (?, ?, ?)').run('fav', 'text', 1)
 
-    db.run(
+    db.prepare(
       'DELETE FROM items WHERE id IN (SELECT id FROM items WHERE is_favorite = 0 ORDER BY created_at ASC LIMIT 2)',
-    )
-    const remaining = db.exec("SELECT content FROM items WHERE is_favorite = 0")
-    const favRemaining = db.exec("SELECT content FROM items WHERE is_favorite = 1")
-    expect(remaining[0]?.values?.length || 0).toBe(0)
-    expect(favRemaining[0].values[0][0]).toBe('fav')
+    ).run()
+    const remaining = db.prepare("SELECT content FROM items WHERE is_favorite = 0").all() as Array<{ content: string }>
+    const favRemaining = db.prepare("SELECT content FROM items WHERE is_favorite = 1").all() as Array<{ content: string }>
+    expect(remaining.length).toBe(0)
+    expect(favRemaining[0].content).toBe('fav')
   })
 
-  it('should vacuum when 25%+ deleted', () => {
-    db.run('INSERT INTO items (content, data_type, is_favorite) VALUES (?, ?, ?)', ['a', 'text', 0])
-    db.run('INSERT INTO items (content, data_type, is_favorite) VALUES (?, ?, ?)', ['b', 'text', 0])
-    db.run('INSERT INTO items (content, data_type, is_favorite) VALUES (?, ?, ?)', ['c', 'text', 0])
-    db.run('INSERT INTO items (content, data_type, is_favorite) VALUES (?, ?, ?)', ['d', 'text', 0])
-    db.run('INSERT INTO items (content, data_type, is_favorite) VALUES (?, ?, ?)', ['e', 'text', 1])
+  it('keeps favorites untouched by bulk delete', () => {
+    db.prepare('DELETE FROM items WHERE is_favorite = 0').run()
+    db.prepare('INSERT INTO items (content, data_type, is_favorite) VALUES (?, ?, ?)').run('plain-bulk', 'text', 0)
+    db.prepare('INSERT INTO items (content, data_type, is_favorite) VALUES (?, ?, ?)').run('pinned-bulk', 'text', 1)
 
-    const beforeStats = db.exec('SELECT COUNT(*) FROM items')
-    const before = beforeStats[0].values[0][0] as number
-
-    const idsToDelete = db.exec('SELECT id FROM items WHERE is_favorite = 0')
-    for (const row of idsToDelete[0]?.values || []) {
-      db.run('DELETE FROM items WHERE id = ?', [row[0]])
-    }
-    const afterDelete = db.exec('SELECT COUNT(*) FROM items')
-    const after = afterDelete[0].values[0][0] as number
-    expect(after).toBeLessThan(before)
+    db.prepare('DELETE FROM items WHERE is_favorite = 0').run()
+    const favRemaining = db.prepare("SELECT content FROM items WHERE is_favorite = 1 AND content = 'pinned-bulk'").all() as Array<{ content: string }>
+    expect(favRemaining.length).toBe(1)
+    expect(favRemaining[0].content).toBe('pinned-bulk')
   })
 })

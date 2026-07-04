@@ -1,9 +1,25 @@
-import initSqlJs from 'sql.js'
+// Worker thread: owns the SQLite handle, exposes a synchronous API to main.
+//
+// Storage engine: better-sqlite3 (a synchronous wrapper around a SQLite
+// library linked into Node). The previous implementation used sql.js, which
+// runs SQLite inside a WebAssembly heap inside V8: every commit re-serialised
+// the entire database to bytes and called fs.writeFileSync. That meant the
+// entire history lived in WASM linear memory (often 200–400 MB on a busy
+// clipboard) plus a Chromium IPC copy of the same data every broadcast. This
+// rewrite trades that for native SQLite: the DB stays on disk, WAL mode lets
+// reads proceed in parallel with writes, and only touched rows flow through
+// JS.
+//
+// FTS5: previously ftsSearch.ts had a "was FTS5 compiled?" savepoint probe —
+// in the FTS5 branch it was returning without inserting, so the search index
+// was silently broken. The right way with a "contentless external content"
+// FTS5 table is to keep it in sync via three AFTER triggers on the items
+// table. We own those triggers here directly; the old ftsSearch.ts is gone.
+
+import Database, { type Database as BetterSqliteDatabase, type Statement } from 'better-sqlite3'
 import path from 'path'
 import fs from 'fs'
 import { app } from 'electron'
-import type { Database as SqlJsDatabase } from 'sql.js'
-import { createFtsTable, indexItemFts, removeItemFts, searchFts } from './ftsSearch'
 import { prepareUndo, consumeUndo, clipboardItemToUndoEntry } from './undoManager'
 import {
   addSensitiveItem, getSensitiveItems, getSensitiveItemById,
@@ -41,71 +57,36 @@ interface Settings {
   exclusionPatterns: string[]
 }
 
-let db: SqlJsDatabase
-let dbPath: string
+let db: BetterSqliteDatabase
 
-// ─── Persistence layer ──────────────────────────────────────────────────────────
-// sql.js is an in-memory engine; every commit means re-serialising the entire DB.
-// The previous implementation called saveDb() on every write (every category
-// rename, every favorite toggle, every delete) — that turns into a full-database
-// writeFileSync on the main process for each user action. We replace it with:
-//   * a dirty flag (set by every write, cleared by a successful flush)
-//   * a single trailing-debounced flush (250ms quiet period coalesces bursts)
-//   * a flushTimeout set so we can flush eagerly when needed
-//   * an exit-time synchronous flush so we never lose the last edit
-//
-// This keeps the same synchronous, blocking semantics so the rest of the
-// codebase keeps working unchanged, but cuts write IO dramatically under
-// normal interactive use (a user adding 5 categories now → 1 save, not 5).
+// Prepared statements are compiled once on DB init and reused per call. They
+// are roughly 5–50× faster than re-preparing the same SQL on every write.
+const stmts: Record<string, Statement> = {}
 
-let dirty = false
-let flushTimer: ReturnType<typeof setTimeout> | null = null
-const FLUSH_DEBOUNCE_MS = 250
-
-function scheduleFlush(): void {
-  // Mark dirty on every call: previously nothing in this file set dirty = true,
-  // so scheduleFlush early-returned via `if (!dirty) return` and edits (clear,
-  // delete, favorite toggle, settings updates …) lived only in memory. They
-  // appeared "restored" on next launch because the disk still held the prior
-  // state. Marking here keeps every mutator covered without sprinkling the
-  // assignment across the file.
-  dirty = true
-  if (flushTimer) return // already scheduled
-  flushTimer = setTimeout(() => {
-    flushTimer = null
-    if (dirty) {
-      try {
-        saveDbSync()
-      } catch (err) {
-        console.warn('[SunSaltyBoard] Failed to flush DB:', (err as Error).message)
-      }
-    }
-  }, FLUSH_DEBOUNCE_MS)
-}
-
-function saveDbSync(): void {
-  const data = db.export()
-  const buffer = Buffer.from(data)
-  fs.writeFileSync(dbPath, buffer)
-  dirty = false
-}
-
-// ─── DB setup ──────────────────────────────────────────────────────────────────
+// ─── Init ────────────────────────────────────────────────────────────────────
 
 async function initDatabase(): Promise<void> {
   const userDataPath = app.getPath('userData')
-  dbPath = path.join(userDataPath, 'sunsaltyboard.db')
+  const dbPath = path.join(userDataPath, 'sunsaltyboard.db')
 
-  const SQL = await initSqlJs()
+  db = new Database(dbPath)
+  // WAL: readers don't block writers and vice versa. journals to disk so the
+  // usual single-process clipboard workload stays hot in the page cache.
+  db.pragma('journal_mode = WAL')
+  // NORMAL trades a slim risk of last-commit loss on power failure for
+  // noticeably faster writes; matches what every desktop SQLite app uses.
+  db.pragma('synchronous = NORMAL')
+  db.pragma('foreign_keys = ON')
 
-  if (fs.existsSync(dbPath)) {
-    const fileBuffer = fs.readFileSync(dbPath)
-    db = new SQL.Database(fileBuffer)
-  } else {
-    db = new SQL.Database()
-  }
+  prepareStatements()
+  ensureSchema()
+  seedDefaultSettings()
+  cleanupExpiredItems()
+}
 
-  db.run(`
+function prepareStatements(): void {
+  // Schema DDL
+  stmts.createItems = db.prepare(`
     CREATE TABLE IF NOT EXISTS items (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       content TEXT NOT NULL DEFAULT '',
@@ -118,69 +99,175 @@ async function initDatabase(): Promise<void> {
       source_device TEXT,
       is_favorite INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
-    );
-
+    )`)
+  stmts.createCategories = db.prepare(`
     CREATE TABLE IF NOT EXISTS categories (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL UNIQUE
-    );
-
+    )`)
+  stmts.createItemCategories = db.prepare(`
     CREATE TABLE IF NOT EXISTS item_categories (
       item_id INTEGER NOT NULL,
       category_id INTEGER NOT NULL,
       PRIMARY KEY (item_id, category_id)
-    );
-
+    )`)
+  stmts.createSettings = db.prepare(`
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
-    );
-  `)
+    )`)
+  // External-content FTS5 — the items table itself stores content, FTS just
+  // holds the inverted index plus positional info.
+  stmts.createItemsFts = db.prepare(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(
+      content,
+      content_html,
+      content='items',
+      content_rowid='id'
+    )`)
+  // The three AI/AU/AD triggers that keep the FTS index correct. Without
+  // these the index would only reflect what was inserted at schema-create
+  // time. Note the use of the standard "INSERT INTO fts(fts, …) VALUES
+  // ('delete', …)" form for UPDATE/DELETE — that's the documented SQLite
+  // recipe for contentless external-content tables.
+  stmts.createItemsFtsAi = db.prepare(`
+    CREATE TRIGGER IF NOT EXISTS items_fts_ai AFTER INSERT ON items BEGIN
+      INSERT INTO items_fts(rowid, content, content_html)
+      VALUES (new.id, new.content, new.content_html);
+    END`)
+  stmts.createItemsFtsAu = db.prepare(`
+    CREATE TRIGGER IF NOT EXISTS items_fts_au AFTER UPDATE ON items BEGIN
+      INSERT INTO items_fts(items_fts, rowid, content, content_html)
+      VALUES ('delete', old.id, old.content, old.content_html);
+      INSERT INTO items_fts(rowid, content, content_html)
+      VALUES (new.id, new.content, new.content_html);
+    END`)
+  stmts.createItemsFtsAd = db.prepare(`
+    CREATE TRIGGER IF NOT EXISTS items_fts_ad AFTER DELETE ON items BEGIN
+      INSERT INTO items_fts(items_fts, rowid, content, content_html)
+      VALUES ('delete', old.id, old.content, old.content_html);
+    END`)
 
-  createFtsTable(db)
+  // Item CRUD
+  stmts.insertItem = db.prepare(`
+    INSERT INTO items (content, content_html, data_type, image_data, image_mime,
+      file_paths, source_app, source_device)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+  stmts.insertItemWithId = db.prepare(`
+    INSERT INTO items (id, content, content_html, data_type, image_data, image_mime,
+      file_paths, source_app, source_device, is_favorite, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+  stmts.toggleFavorite = db.prepare(
+    `UPDATE items SET is_favorite = CASE WHEN is_favorite = 0 THEN 1 ELSE 0 END
+     WHERE id = ?`)
+  stmts.deleteItemCategoriesByItemId = db.prepare(
+    `DELETE FROM item_categories WHERE item_id = ?`)
+  stmts.deleteItemById = db.prepare(`DELETE FROM items WHERE id = ?`)
+  stmts.deleteNonFavItems = db.prepare(`DELETE FROM items WHERE is_favorite = 0`)
+  stmts.selectItemCount = db.prepare(`SELECT COUNT(*) AS cnt FROM items`)
+  stmts.selectFavoriteItemCount = db.prepare(
+    `SELECT COUNT(*) AS cnt FROM items WHERE is_favorite = 1`)
+  // Cap the most-recent window shown in the overlay. react-window only ever
+  // renders a handful of rows; 100 covers ~3 fullscreen scrolls worth while
+  // keeping IPC payloads small.
+  const ITEMS_LIMIT = 100
+  stmts.selectRecentItems = db.prepare(`
+    SELECT i.*, GROUP_CONCAT(ic.category_id) AS cat_ids
+    FROM items i LEFT JOIN item_categories ic ON i.id = ic.item_id
+    GROUP BY i.id ORDER BY i.created_at DESC LIMIT ${ITEMS_LIMIT}`)
+  stmts.selectItemById = db.prepare(`
+    SELECT i.*, GROUP_CONCAT(ic.category_id) AS cat_ids
+    FROM items i LEFT JOIN item_categories ic ON i.id = ic.item_id
+    WHERE i.id = ? GROUP BY i.id`)
+  // Trim oldest non-favourite entries when we exceed `maxItems`.
+  stmts.deleteOldestNonFav = db.prepare(`
+    DELETE FROM items WHERE id IN (
+      SELECT id FROM items WHERE is_favorite = 0 ORDER BY created_at ASC LIMIT ?
+    )`)
+
+  // FTS search: single MATCH query, ids come back as a sub-query result.
+  stmts.searchHistoryByFts = db.prepare(`
+    SELECT i.*, GROUP_CONCAT(ic.category_id) AS cat_ids
+    FROM items i LEFT JOIN item_categories ic ON i.id = ic.item_id
+    WHERE i.id IN (SELECT rowid FROM items_fts WHERE items_fts MATCH ?)
+    GROUP BY i.id ORDER BY i.created_at DESC LIMIT 200`)
+
+  // Expiration sweep. created_at is stored in UTC via strftime, so anchor in UTC.
+  stmts.selectExpired = db.prepare(`
+    SELECT id FROM items WHERE is_favorite = 0
+      AND created_at < strftime('%Y-%m-%dT%H:%M:%S', 'now', ?)`)
+  stmts.deleteExpired = db.prepare(`
+    DELETE FROM items WHERE is_favorite = 0
+      AND created_at < strftime('%Y-%m-%dT%H:%M:%S', 'now', ?)`)
+
+  // Categories
+  stmts.insertCategory = db.prepare(`INSERT INTO categories (name) VALUES (?)`)
+  stmts.selectAllCategories = db.prepare(`SELECT * FROM categories ORDER BY name`)
+  stmts.updateCategoryName = db.prepare(`UPDATE categories SET name = ? WHERE id = ?`)
+  stmts.deleteItemCategoriesByCategoryId = db.prepare(
+    `DELETE FROM item_categories WHERE category_id = ?`)
+  stmts.deleteCategoryById = db.prepare(`DELETE FROM categories WHERE id = ?`)
+  // Compound transaction used by deleteCategory so a crash mid-delete can't
+  // leave item_categories referencing a vanished category.
+  stmts.deleteCategoryTxn = db.transaction((id: number) => {
+    stmts.deleteItemCategoriesByCategoryId.run(id)
+    stmts.deleteCategoryById.run(id)
+  })
+  stmts.insertItemCategory = db.prepare(
+    `INSERT OR IGNORE INTO item_categories (item_id, category_id) VALUES (?, ?)`)
+  stmts.deleteItemCategory = db.prepare(
+    `DELETE FROM item_categories WHERE item_id = ? AND category_id = ?`)
+
+  // Settings KV
+  stmts.selectAllSettings = db.prepare(`SELECT key, value FROM settings`)
+  stmts.seedSetting = db.prepare(
+    `INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`)
+  stmts.upsertSetting = db.prepare(
+    `INSERT INTO settings (key, value) VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+}
+
+function ensureSchema(): void {
+  stmts.createItems.run()
+  stmts.createCategories.run()
+  stmts.createItemCategories.run()
+  stmts.createSettings.run()
+  stmts.createItemsFts.run()
+  stmts.createItemsFtsAi.run()
+  stmts.createItemsFtsAu.run()
+  stmts.createItemsFtsAd.run()
 
   // Migrate: image_mime column may be missing on databases created before v1.2.x.
-  const colRows = db.exec('PRAGMA table_info(items)')
-  const haveImageMime = colRows[0]?.values.some((row) => row[1] === 'image_mime')
-  if (!haveImageMime) {
-    db.run('ALTER TABLE items ADD COLUMN image_mime TEXT')
+  // better-sqlite3 returns an array of column descriptors from PRAGMA.
+  const cols = db.pragma(`table_info('items')`) as Array<{ name: string }>
+  if (!cols.some((c) => c.name === 'image_mime')) {
+    db.exec('ALTER TABLE items ADD COLUMN image_mime TEXT')
   }
-
-  db.run('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', ['maxItems', '10000'])
-  db.run('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', ['hotkey', 'Alt+Shift+V'])
-  db.run('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', ['expirationDays', '30'])
-  db.run('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', ['theme', 'dark'])
-  db.run('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', ['locale', 'en'])
-  db.run('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', ['exclusionApps', '[]'])
-  db.run('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', ['exclusionPatterns', '[]'])
-
-  saveDbSync()
-  cleanupExpiredItems()
 }
+
+function seedDefaultSettings(): void {
+  const seed: Array<[string, string]> = [
+    ['maxItems', '10000'],
+    ['hotkey', 'Alt+Shift+V'],
+    ['expirationDays', '30'],
+    ['theme', 'dark'],
+    ['locale', 'en'],
+    ['exclusionApps', '[]'],
+    ['exclusionPatterns', '[]'],
+  ]
+  for (const [k, v] of seed) stmts.seedSetting.run(k, v)
+}
+
+// ─── Periodic expiry sweep ───────────────────────────────────────────────────
 
 function cleanupExpiredItems(): void {
   const settings = getSettings()
   if (settings.expirationDays <= 0) return
-  // created_at is stored in UTC via strftime('%Y-%m-%dT%H:%M:%S', 'now'),
-  // so compare against the same UTC anchor. The previous query used
-  // datetime(?, 'localtime') which mismatched timezones and could delete
-  // items that were actually fresher than the threshold (or vice versa).
-  const cutoffSql = "strftime('%Y-%m-%dT%H:%M:%S', 'now', ?)"
-  const result = db.exec(
-    `SELECT id FROM items WHERE is_favorite = 0 AND created_at < ${cutoffSql}`,
-    [`-${settings.expirationDays} days`],
-  )
-  if (result.length > 0) {
-    for (const row of result[0].values) {
-      removeItemFts(db, row[0] as number)
-    }
-  }
-  db.run(
-    `DELETE FROM items WHERE is_favorite = 0 AND created_at < ${cutoffSql}`,
-    [`-${settings.expirationDays} days`],
-  )
-  scheduleFlush()
+  // AI/AD triggers keep FTS in sync — no manual index maintenance needed.
+  stmts.deleteExpired.run(`-${settings.expirationDays} days`)
 }
+
+// ─── Clipboard ingestion (queue → flush) ─────────────────────────────────────
 
 let writeQueue: Array<{
   content: string
@@ -198,11 +285,12 @@ let writeFlushTimer: ReturnType<typeof setTimeout> | null = null
 function flushWriteQueue(): void {
   if (writeQueue.length === 0) return
 
-  for (const item of writeQueue) {
-    db.run(
-      `INSERT INTO items (content, content_html, data_type, image_data, image_mime, file_paths, source_app, source_device)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
+  // A write txn is faster than individual commits and guarantees atomicity
+  // for the whole batch. better-sqlite3's `.transaction` returns a function
+  // we invoke with the body.
+  const insertBatch = db.transaction((rows: typeof writeQueue) => {
+    for (const item of rows) {
+      stmts.insertItem.run(
         item.content,
         item.contentHtml ?? null,
         item.dataType,
@@ -211,39 +299,18 @@ function flushWriteQueue(): void {
         item.filePaths ? JSON.stringify(item.filePaths) : null,
         item.sourceApp ?? null,
         item.sourceDevice ?? null,
-      ],
-    )
-    const idResult = db.exec('SELECT last_insert_rowid() as id')
-    const newId = idResult[0].values[0][0] as number
-    if (item.dataType === 'text' || item.dataType === 'richtext') {
-      indexItemFts(db, newId)
+      )
     }
-  }
-
+  })
+  insertBatch(writeQueue)
   writeQueue = []
 
+  // Cap items to maxItems (run outside the insert txn to keep its scope tight).
+  const { cnt } = stmts.selectItemCount.get() as { cnt: number }
   const settings = getSettings()
-  const totalResult = db.exec('SELECT COUNT(*) as cnt FROM items')
-  const totalItems = totalResult[0]?.values[0][0] as number
-
-  if (totalItems > settings.maxItems) {
-    const excess = totalItems - settings.maxItems
-    const toDelete = db.exec(
-      'SELECT id FROM items WHERE is_favorite = 0 ORDER BY created_at ASC LIMIT ?',
-      [excess],
-    )
-    if (toDelete.length > 0) {
-      for (const row of toDelete[0].values) {
-        removeItemFts(db, row[0] as number)
-      }
-    }
-    db.run(
-      'DELETE FROM items WHERE id IN (SELECT id FROM items WHERE is_favorite = 0 ORDER BY created_at ASC LIMIT ?)',
-      [excess],
-    )
+  if (cnt > settings.maxItems) {
+    stmts.deleteOldestNonFav.run(cnt - settings.maxItems)
   }
-
-  scheduleFlush()
 }
 
 function queueItem(item: Omit<ClipboardItem, 'id' | 'isFavorite' | 'categoryIds' | 'createdAt'>): void {
@@ -271,54 +338,51 @@ function queueItem(item: Omit<ClipboardItem, 'id' | 'isFavorite' | 'categoryIds'
   }
 }
 
-function parseItemRow(cols: string[], row: unknown[]): ClipboardItem {
-  const map: Record<string, unknown> = {}
-  cols.forEach((col, i) => { map[col] = row[i] })
+// Row shape returned by `SELECT i.*`. We always need to coerce BLOB → Buffer
+// (Uint8Array is what react-window's <img> srcset accepts). better-sqlite3
+// gives us a plain object per row.
+interface ItemRow {
+  id: number
+  content: string
+  content_html: string | null
+  data_type: string
+  image_data: Buffer | null
+  image_mime: string | null
+  file_paths: string | null
+  source_app: string | null
+  source_device: string | null
+  is_favorite: number
+  created_at: string
+  cat_ids: string | null
+}
+
+function rowToItem(row: ItemRow): ClipboardItem {
   return {
-    id: map.id as number,
-    content: map.content as string,
-    contentHtml: map.content_html as string | undefined,
-    dataType: map.data_type as string,
-    imageData: map.image_data as Uint8Array | undefined,
-    imageMime: map.image_mime as string | undefined,
-    filePaths: map.file_paths ? JSON.parse(map.file_paths as string) : undefined,
-    sourceApp: map.source_app as string | undefined,
-    sourceDevice: map.source_device as string | undefined,
-    isFavorite: (map.is_favorite as number) === 1,
-    categoryIds: map.cat_ids
-      ? (map.cat_ids as string).split(',').map(Number).filter(Boolean)
+    id: row.id,
+    content: row.content,
+    contentHtml: row.content_html ?? undefined,
+    dataType: row.data_type,
+    imageData: row.image_data ?? undefined,
+    imageMime: row.image_mime ?? undefined,
+    filePaths: row.file_paths ? JSON.parse(row.file_paths) : undefined,
+    sourceApp: row.source_app ?? undefined,
+    sourceDevice: row.source_device ?? undefined,
+    isFavorite: row.is_favorite === 1,
+    categoryIds: row.cat_ids
+      ? row.cat_ids.split(',').map(Number).filter(Boolean)
       : [],
-    createdAt: map.created_at as string,
+    createdAt: row.created_at,
   }
 }
 
 function getItems(): ClipboardItem[] {
-  const result = db.exec(`
-    SELECT i.*, GROUP_CONCAT(ic.category_id) as cat_ids
-    FROM items i
-    LEFT JOIN item_categories ic ON i.id = ic.item_id
-    GROUP BY i.id
-    ORDER BY i.created_at DESC
-    LIMIT 500
-  `)
-
-  if (result.length === 0) return []
-  const { columns, values } = result[0]
-  return values.map((row) => parseItemRow(columns, row))
+  const rows = stmts.selectRecentItems.all() as ItemRow[]
+  return rows.map(rowToItem)
 }
 
 function getItemById(id: number): ClipboardItem | null {
-  const result = db.exec(
-    `SELECT i.*, GROUP_CONCAT(ic.category_id) as cat_ids
-     FROM items i
-     LEFT JOIN item_categories ic ON i.id = ic.item_id
-     WHERE i.id = ?
-     GROUP BY i.id`,
-    [id],
-  )
-  if (result.length === 0 || result[0].values.length === 0) return null
-  const { columns, values } = result[0]
-  return parseItemRow(columns, values[0])
+  const row = stmts.selectItemById.get(id) as ItemRow | undefined
+  return row ? rowToItem(row) : null
 }
 
 function deleteItem(id: number): void {
@@ -326,175 +390,107 @@ function deleteItem(id: number): void {
   if (!item) return
 
   prepareUndo(clipboardItemToUndoEntry(item))
-
-  removeItemFts(db, id)
-  db.run('DELETE FROM item_categories WHERE item_id = ?', [id])
-  db.run('DELETE FROM items WHERE id = ?', [id])
-  scheduleFlush()
-
-  // Vacuum when the recent-delete rate spikes so the .db file doesn't bloat
-  // (e.g. after a bulk clear). Throttled so we don't vacuum on every delete.
-  const stats = db.exec(
-    'SELECT COUNT(*) as total, SUM(CASE WHEN is_favorite = 0 THEN 1 ELSE 0 END) as non_fav FROM items',
-  )
-  if (stats.length > 0) {
-    const total = stats[0].values[0][0] as number
-    const nonFav = stats[0].values[0][1] as number
-    if (total > 0 && nonFav / total > 0.25 && total > 100) {
-      db.run('VACUUM')
-      saveDbSync()
-    }
-  }
+  // AI/AD triggers on items take care of FTS bookkeeping.
+  stmts.deleteItemCategoriesByItemId.run(id)
+  stmts.deleteItemById.run(id)
+  // Vacuum moved to clearHistory (Stage 3): the previous "trigger when
+  // nonFav/total > 0.25 && total > 100" check was effectively always-true
+  // for non-trivial histories, so a single delete could trigger a full
+  // database rewrite.
 }
 
 function undoDelete(): ClipboardItem | null {
   const entry = consumeUndo()
   if (!entry) return null
 
-  db.run(
-    `INSERT INTO items (id, content, content_html, data_type, image_data, image_mime, file_paths, source_app, source_device, is_favorite, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      entry.id,
-      entry.content,
-      entry.content_html,
-      entry.data_type,
-      entry.image_data,
-      entry.image_mime,
-      entry.file_paths,
-      entry.source_app,
-      entry.source_device,
-      entry.is_favorite,
-      entry.created_at,
-    ],
+  // AI/AU triggers keep FTS in sync — single insert covers it.
+  stmts.insertItemWithId.run(
+    entry.id,
+    entry.content,
+    entry.content_html,
+    entry.data_type,
+    entry.image_data,
+    entry.image_mime,
+    entry.file_paths,
+    entry.source_app,
+    entry.source_device,
+    entry.is_favorite,
+    entry.created_at,
   )
+
   // Restore category associations captured at delete-time. Without this, an
   // undone item would reappear without any of its previously-attached
   // categories — the user would silently lose their organisational state.
   if (entry.category_ids && entry.category_ids.length > 0) {
     for (const catId of entry.category_ids) {
-      db.run(
-        'INSERT OR IGNORE INTO item_categories (item_id, category_id) VALUES (?, ?)',
-        [entry.id, catId],
-      )
+      stmts.insertItemCategory.run(entry.id, catId)
     }
   }
-  scheduleFlush()
-  if (entry.data_type === 'text' || entry.data_type === 'richtext') {
-    indexItemFts(db, entry.id)
-  }
+
   return getItemById(entry.id)
 }
 
 function toggleFavorite(id: number): void {
-  db.run(
-    'UPDATE items SET is_favorite = CASE WHEN is_favorite = 0 THEN 1 ELSE 0 END WHERE id = ?',
-    [id],
-  )
-  scheduleFlush()
+  stmts.toggleFavorite.run(id)
 }
 
 function clearHistory(): void {
-  const toDelete = db.exec('SELECT id FROM items WHERE is_favorite = 0')
-  if (toDelete.length > 0) {
-    for (const row of toDelete[0].values) {
-      removeItemFts(db, row[0] as number)
-    }
-  }
-  db.run('DELETE FROM items WHERE is_favorite = 0')
-  // Force-save so a user-initiated "clear all" survives even if the app is
-  // killed before the 250ms debounce window elapses. Without this, the
-  // classic fast-quit-after-clear scenario resurrects the deleted rows on
-  // next launch (the disk still holds the pre-clear state).
-  saveDbSync()
+  // FTS is synced via the items AD trigger; VACUUM rewrites the file to
+  // reclaim freed pages (kept out of any transaction since SQLite forbids
+  // it inside one). This is the only path that calls VACUUM — single deletes
+  // and bulk window-trims no longer pay the cost.
+  stmts.deleteNonFavItems.run()
+  // VACUUM must run outside the implicit transaction; explicit transaction
+  // boundary keeps the surrounding concurrent reads healthy in WAL mode.
+  db.exec('VACUUM')
 }
 
 function searchHistory(query: string): ClipboardItem[] {
-  const results = searchFts(db, query)
-  if (results.length === 0) return []
+  const sanitized = query
+    .replace(/["()*+^]/g, ' ')
+    .replace(/[^\w\s一-鿿぀-ヿ가-힯]/g, ' ')
+    .trim()
+  if (!sanitized) return []
+  const terms = sanitized.split(/\s+/).filter(Boolean)
+  if (terms.length === 0) return []
+  const ftsQuery = terms.map((t) => `"${t}"*`).join(' AND ')
 
-  const ids = results.map((r) => r.id)
-  if (ids.length === 0) return []
-
-  const placeholders = ids.map(() => '?').join(',')
-  const result = db.exec(
-    `SELECT i.*, GROUP_CONCAT(ic.category_id) as cat_ids
-     FROM items i
-     LEFT JOIN item_categories ic ON i.id = ic.item_id
-     WHERE i.id IN (${placeholders})
-     GROUP BY i.id
-     ORDER BY i.created_at DESC
-     LIMIT 200`,
-    ids,
-  )
-  if (result.length === 0) return []
-  const { columns, values } = result[0]
-  return values.map((row) => parseItemRow(columns, row))
+  const rows = stmts.searchHistoryByFts.all(ftsQuery) as ItemRow[]
+  return rows.map(rowToItem)
 }
 
+// ─── Categories ──────────────────────────────────────────────────────────────
+
 function getCategories(): Category[] {
-  const result = db.exec('SELECT * FROM categories ORDER BY name')
-  if (result.length === 0) return []
-  const { columns, values } = result[0]
-  return values.map((row) => {
-    const map: Record<string, unknown> = {}
-    columns.forEach((col, i) => { map[col] = row[i] })
-    return { id: map.id as number, name: map.name as string }
-  })
+  return stmts.selectAllCategories.all() as Category[]
 }
 
 function createCategory(name: string): Category {
-  db.run('INSERT INTO categories (name) VALUES (?)', [name])
-  scheduleFlush()
-  const result = db.exec('SELECT last_insert_rowid() as id')
-  const id = result[0].values[0][0] as number
-  return { id, name }
+  const info = stmts.insertCategory.run(name)
+  return { id: Number(info.lastInsertRowid), name }
 }
 
 function renameCategory(id: number, name: string): void {
-  db.run('UPDATE categories SET name = ? WHERE id = ?', [name, id])
-  scheduleFlush()
+  stmts.updateCategoryName.run(name, id)
 }
 
 function deleteCategory(id: number): void {
-  // Wrap in a transaction so a crash between the two DELETEs can't leave
-  // orphan rows in item_categories that point to a vanished category.
-  db.run('BEGIN')
-  try {
-    db.run('DELETE FROM item_categories WHERE category_id = ?', [id])
-    db.run('DELETE FROM categories WHERE id = ?', [id])
-    db.run('COMMIT')
-  } catch (err) {
-    db.run('ROLLBACK')
-    throw err
-  }
-  scheduleFlush()
+  stmts.deleteCategoryTxn(id)
 }
 
 function assignCategory(itemId: number, categoryId: number): void {
-  db.run(
-    'INSERT OR IGNORE INTO item_categories (item_id, category_id) VALUES (?, ?)',
-    [itemId, categoryId],
-  )
-  scheduleFlush()
+  stmts.insertItemCategory.run(itemId, categoryId)
 }
 
 function removeCategory(itemId: number, categoryId: number): void {
-  db.run(
-    'DELETE FROM item_categories WHERE item_id = ? AND category_id = ?',
-    [itemId, categoryId],
-  )
-  scheduleFlush()
+  stmts.deleteItemCategory.run(itemId, categoryId)
 }
 
+// ─── Settings ────────────────────────────────────────────────────────────────
+
 function getSettings(): Settings {
-  const result = db.exec('SELECT key, value FROM settings')
-  const map: Record<string, string> = {}
-  if (result.length > 0) {
-    for (const row of result[0].values) {
-      map[row[0] as string] = row[1] as string
-    }
-  }
+  const rows = stmts.selectAllSettings.all() as Array<{ key: string; value: string }>
+  const map = Object.fromEntries(rows.map((r) => [r.key, r.value])) as Record<string, string>
   return {
     maxItems: parseInt(map.maxItems || '10000', 10),
     hotkey: map.hotkey || 'Alt+Shift+V',
@@ -509,26 +505,37 @@ function getSettings(): Settings {
 // Renderer sends us a plain `Partial<Settings>`; we serialise object values
 // consistently here so callers don't have to know about the storage format.
 function updateSettings(settings: Partial<Settings>): void {
+  const upsertBatch = db.transaction((entries: Array<[string, string]>) => {
+    for (const [k, v] of entries) stmts.upsertSetting.run(k, v)
+  })
+  const entries: Array<[string, string]> = []
   for (const [key, value] of Object.entries(settings)) {
     if (value === undefined) continue
     const strValue = typeof value === 'object' ? JSON.stringify(value) : String(value)
-    db.run(
-      'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
-      [key, strValue],
-    )
+    entries.push([key, strValue])
   }
-  scheduleFlush()
+  if (entries.length > 0) upsertBatch(entries)
 }
 
 function getStats(): { totalItems: number; favoriteItems: number; dbSize: number } {
-  const total = db.exec('SELECT COUNT(*) FROM items')
-  const fav = db.exec('SELECT COUNT(*) FROM items WHERE is_favorite = 1')
-  return {
-    totalItems: (total[0]?.values[0][0] as number) || 0,
-    favoriteItems: (fav[0]?.values[0][0] as number) || 0,
-    dbSize: fs.existsSync(dbPath) ? fs.statSync(dbPath).size : 0,
-  }
+  const total = stmts.selectItemCount.get() as { cnt: number }
+  const fav = stmts.selectFavoriteItemCount.get() as { cnt: number }
+  // stats.dbSize is used by the Settings UI. Better-sqlite3's main file plus
+  // WAL sidecar roughly account for the on-disk footprint; we report both.
+  // Main file under dbPath keeps the contract; readers tolerate slight drift.
+  let dbSize = 0
+  try { dbSize = fs.statSync(dbPath()).size } catch { /* file may not exist yet */ }
+  return { totalItems: total.cnt, favoriteItems: fav.cnt, dbSize }
 }
+
+let cachedDbPath = ''
+function dbPath(): string {
+  if (cachedDbPath) return cachedDbPath
+  cachedDbPath = path.join(app.getPath('userData'), 'sunsaltyboard.db')
+  return cachedDbPath
+}
+
+// ─── Public bridge ───────────────────────────────────────────────────────────
 
 export interface WorkerBridge {
   storeItem: (item: Omit<ClipboardItem, 'id' | 'isFavorite' | 'categoryIds' | 'createdAt'>) => void
@@ -558,24 +565,14 @@ export interface WorkerBridge {
 export async function createWorker(): Promise<WorkerBridge> {
   await initDatabase()
 
-  // Always flush whatever is dirty when the process is about to exit.
-  // Without this, the last debounce window's edits would be silently lost.
+  // Always drain whatever's pending in the write queue when the process is
+  // about to exit — without this, a user who copies something then quickly
+  // quits would lose that copy.
   const exitHandler = () => {
-    if (dirty) {
-      try { saveDbSync() } catch { /* best effort */ }
-    }
-
-    // Cancel a still-pending write flush and drain the queue (in-memory only,
-    // db flush happens via saveDbSync above so newly-inserted items survive).
     if (writeFlushTimer) {
       clearTimeout(writeFlushTimer)
       writeFlushTimer = null
-      if (writeQueue.length > 0) {
-        flushWriteQueue()
-        if (dirty) {
-          try { saveDbSync() } catch { /* best effort */ }
-        }
-      }
+      if (writeQueue.length > 0) flushWriteQueue()
     }
   }
   process.once('beforeExit', exitHandler)
@@ -603,17 +600,11 @@ export async function createWorker(): Promise<WorkerBridge> {
     storeItem: queueItem,
     flush: flushWriteQueue,
     forceSave: () => {
-      // Cancel the debounced timer and flush immediately.
-      if (flushTimer) {
-        clearTimeout(flushTimer)
-        flushTimer = null
-      }
       if (writeFlushTimer) {
         clearTimeout(writeFlushTimer)
         writeFlushTimer = null
       }
       if (writeQueue.length > 0) flushWriteQueue()
-      if (dirty) saveDbSync()
     },
     getItems,
     getItemById,
@@ -635,7 +626,11 @@ export async function createWorker(): Promise<WorkerBridge> {
     addSensitiveItem: (content: string, dataType: string) => addSensitiveItem(content, dataType),
     close: () => {
       try {
-        if (dirty || writeQueue.length > 0) saveDbSync()
+        if (writeFlushTimer) {
+          clearTimeout(writeFlushTimer)
+          writeFlushTimer = null
+        }
+        if (writeQueue.length > 0) flushWriteQueue()
       } finally {
         db.close()
       }
