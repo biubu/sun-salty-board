@@ -13,6 +13,7 @@ import {
   startSync, stopSync, broadcastClipboard, getPeers, setDeviceName,
 } from './sync'
 import { setupAutoUpdater } from './autoUpdater'
+import { autoUpdater } from 'electron-updater'
 
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
@@ -50,6 +51,7 @@ function createWindow(): void {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
     },
   })
 
@@ -59,7 +61,11 @@ function createWindow(): void {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'))
   }
 
-  mainWindow.on('blur', () => mainWindow?.hide())
+  mainWindow.on('blur', () => {
+    // Hide on blur so the overlay doesn't linger behind other windows.
+    // Exception: in dev we keep it open so DevTools focus doesn't dismiss it.
+    if (!isDev) mainWindow?.hide()
+  })
 
   mainWindow.on('close', (e) => {
     if (!isQuitting) {
@@ -74,22 +80,36 @@ function toggleWindow(): void {
   if (mainWindow.isVisible()) {
     mainWindow.hide()
   } else {
-    const cursorPoint = screen.getCursorScreenPoint()
-    const display = screen.getDisplayNearestPoint(cursorPoint)
-    const { x: dx, y: dy, width: dw, height: dh } = display.workArea
-    const [winWidth, winHeight] = mainWindow.getSize()
-    const winX = Math.max(dx, Math.min(cursorPoint.x - Math.round(winWidth / 2), dx + dw - winWidth))
-    const winY = Math.max(dy, Math.min(cursorPoint.y + 24, dy + dh - winHeight))
-    mainWindow.setPosition(winX, winY)
-    mainWindow.show()
-    mainWindow.focus()
-    mainWindow.webContents.send('overlay-opened')
+    showWindowAtCursor()
   }
 }
 
+// Always show (never toggle) and re-anchor under the cursor. Used by tray menu
+// items that must surface a specific view (e.g. Settings) even when the
+// overlay is already visible — otherwise the IPC handler fires but the user
+// sees no UI because the window never receives the show() call.
+function showWindowAtCursor(): void {
+  if (!mainWindow) return
+  const cursorPoint = screen.getCursorScreenPoint()
+  const display = screen.getDisplayNearestPoint(cursorPoint)
+  const { x: dx, y: dy, width: dw, height: dh } = display.workArea
+  const [winWidth, winHeight] = mainWindow.getSize()
+  const winX = Math.max(dx, Math.min(cursorPoint.x - Math.round(winWidth / 2), dx + dw - winWidth))
+  const winY = Math.max(dy, Math.min(cursorPoint.y + 24, dy + dh - winHeight))
+  mainWindow.setPosition(winX, winY)
+  mainWindow.show()
+  mainWindow.focus()
+  mainWindow.webContents.send('overlay-opened')
+}
+
 function createTray(): void {
-  const iconPath = path.join(__dirname, '../resources/icon.png')
-  const icon = nativeImage.createFromPath(iconPath).resize({ width: 22, height: 22 })
+  // macOS expects an alpha-only template image for the menu bar; the colored
+  // app icon would render as a solid blob once setTemplateImage(true) drops
+  // its RGB channels and keeps only the (fully opaque) alpha mask.
+  const iconPath = process.platform === 'darwin'
+    ? path.join(__dirname, '../resources/trayIconTemplate.png')
+    : path.join(__dirname, '../resources/icon.png')
+  const icon = nativeImage.createFromPath(iconPath)
   if (process.platform === 'darwin') {
     icon.setTemplateImage(true)
   }
@@ -97,7 +117,15 @@ function createTray(): void {
   tray.setToolTip('SunSaltyBoard')
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'Open History', click: toggleWindow },
-    { label: 'Settings', click: () => mainWindow?.webContents.send('open-settings') },
+    {
+      label: 'Settings',
+      click: () => {
+        // The window is usually hidden when the tray menu is open; sending
+        // IPC alone would update renderer state without surfacing the UI.
+        showWindowAtCursor()
+        mainWindow?.webContents.send('open-settings')
+      },
+    },
     { type: 'separator' },
     { label: 'About', click: () => {} },
     { type: 'separator' },
@@ -322,12 +350,11 @@ app.on('ready', async () => {
     }
   })
 
-  ipcMain.on('overlay-keydown', (_e, key: string) => {
-    const num = parseInt(key, 10)
-    if (num >= 1 && num <= 9) {
-      mainWindow?.webContents.send('paste-by-index', num - 1)
-    }
-  })
+  // Reserved hook for future overlay-only keyboard handling. The renderer
+  // currently handles digit-key shortcuts locally via
+  // window.electronAPI.pasteByIndex (pasteItem IPC), so this is a no-op
+  // stub kept for ABI compatibility with future overlays.
+  ipcMain.on('overlay-keydown', (_e, _key: string) => { /* no-op */ })
 
   ipcMain.handle('get-stats', () => {
     return workerBridge?.getStats() ?? { totalItems: 0, favoriteItems: 0, dbSize: 0 }
@@ -335,6 +362,28 @@ app.on('ready', async () => {
 
   ipcMain.handle('get-sensitive-items', () => {
     return workerBridge?.getSensitiveItems() ?? []
+  })
+
+  ipcMain.on('apply-update', () => {
+    if (autoUpdater.updateDownloaded) {
+      // quitAndInstall(isSilent=false, isForceRunAfter=true) restarts the
+      // app and applies the update without waiting for a graceful quit.
+      // We deliberately do NOT removeAllListeners — other UI events
+      // (download-progress for any in-flight update) should keep flowing.
+      autoUpdater.quitAndInstall(false, true)
+    }
+  })
+
+  ipcMain.on('check-for-update', () => {
+    autoUpdater.checkForUpdates().catch((err) => {
+      mainWindow?.webContents.send('update-error', { message: err?.message ?? String(err) })
+    })
+  })
+
+  ipcMain.on('download-update', () => {
+    autoUpdater.downloadUpdate().catch((err) => {
+      mainWindow?.webContents.send('update-error', { message: err?.message ?? String(err) })
+    })
   })
 
   ipcMain.handle('get-sync-peers', () => {

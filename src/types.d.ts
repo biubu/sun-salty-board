@@ -1,17 +1,25 @@
+import type {
+  ClipboardItem,
+  Category,
+  Settings,
+  SensitiveItem,
+  SyncPeer,
+} from './types/clipboard'
+
 export {}
 
 declare global {
   interface Window {
     electronAPI: {
-      onHistoryUpdate: (callback: (items: import('./App').ClipboardItem[]) => void) => () => void
+      onHistoryUpdate: (callback: (items: ClipboardItem[]) => void) => () => void
       onOpenSettings: (callback: () => void) => () => void
       pasteItem: (id: number) => void
       pasteByIndex: (index: number) => void
       deleteItem: (id: number) => void
-      undoDelete: () => Promise<import('./App').ClipboardItem | null>
+      undoDelete: () => Promise<ClipboardItem | null>
       toggleFavorite: (id: number) => void
-      searchHistory: (query: string) => Promise<import('./App').ClipboardItem[]>
-      getHistory: () => Promise<import('./App').ClipboardItem[]>
+      searchHistory: (query: string) => Promise<ClipboardItem[]>
+      getHistory: () => Promise<ClipboardItem[]>
       getCategories: () => Promise<Category[]>
       createCategory: (name: string) => Promise<Category>
       renameCategory: (id: number, name: string) => Promise<void>
@@ -20,43 +28,18 @@ declare global {
       removeCategory: (itemId: number, categoryId: number) => void
       clearHistory: () => void
       getSettings: () => Promise<Settings>
-      updateSettings: (settings: Record<string, unknown>) => void
+      updateSettings: (settings: Partial<Settings>) => void
       getStats: () => Promise<{ totalItems: number; favoriteItems: number; dbSize: number }>
       getSensitiveItems: () => Promise<SensitiveItem[]>
       getSyncPeers: () => Promise<SyncPeer[]>
       onUpdateAvailable: (callback: (info: unknown) => void) => () => void
-      onUpdateDownloaded: (callback: () => void) => () => void
+      onUpdateNotAvailable: (callback: (info: unknown) => void) => () => void
+      onUpdateDownloadProgress: (callback: (progress: unknown) => void) => () => void
+      onUpdateDownloaded: (callback: (info: unknown) => void) => () => void
+      onUpdateError: (callback: (err: { message: string }) => void) => () => void
+      checkForUpdate: () => void
+      downloadUpdate: () => void
+      applyUpdate: () => void
     }
   }
-}
-
-export interface Category {
-  id: number
-  name: string
-}
-
-export interface Settings {
-  maxItems: number
-  hotkey: string
-  expirationDays: number
-  syncEnabled: boolean
-  theme: 'light' | 'dark'
-  locale: string
-  exclusionApps: string[]
-  exclusionPatterns: string[]
-}
-
-export interface SensitiveItem {
-  id: number
-  content: string
-  dataType: string
-  capturedAt: number
-}
-
-export interface SyncPeer {
-  id: string
-  hostname: string
-  deviceName: string
-  address: string
-  port: number
 }

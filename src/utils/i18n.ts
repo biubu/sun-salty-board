@@ -1,4 +1,4 @@
-import { createContext, useContext } from 'react'
+import { createContext, useContext, useEffect, useState } from 'react'
 
 export type Locale = 'en' | 'zh'
 
@@ -58,6 +58,15 @@ const translations: Record<Locale, Record<string, string>> = {
     'settings.sync_enable': 'Enable network sync',
     'settings.peers': 'Discovered peers',
     'settings.no_peers': 'No peers discovered on LAN',
+    'settings.update_available': 'available — downloading…',
+    'settings.update_ready': 'downloaded — restart to install',
+    'settings.update_restart': 'Restart & install',
+    'settings.update_check': 'Check for updates',
+    'settings.update_checking': 'Checking…',
+    'settings.update_none': 'You\'re up to date',
+    'settings.update_error': 'Update check failed',
+    'settings.update_progress': 'Downloading {p}%',
+    'settings.update_section': 'Updates',
   },
   zh: {
     'search.placeholder': '搜索剪贴板历史...',
@@ -114,6 +123,15 @@ const translations: Record<Locale, Record<string, string>> = {
     'settings.sync_enable': '启用网络同步',
     'settings.no_peers': '未发现其他设备',
     'settings.peers': '已发现的设备',
+    'settings.update_available': '可用 — 正在下载…',
+    'settings.update_ready': '已下载 — 重启以安装',
+    'settings.update_restart': '立即重启并升级',
+    'settings.update_check': '检查更新',
+    'settings.update_checking': '正在检查…',
+    'settings.update_none': '已是最新版本',
+    'settings.update_error': '检查更新失败',
+    'settings.update_progress': '下载中 {p}%',
+    'settings.update_section': '更新',
   },
 }
 
@@ -141,4 +159,33 @@ export function translate(locale: Locale, key: string, params?: Record<string, s
     (acc, [k, v]) => acc.replace(`{${k}}`, String(v)),
     text,
   )
+}
+
+// Returns the current Date and re-renders the caller on a coarse interval so
+// relative-time labels (just-now / N minutes ago / N hours ago) progress
+// without requiring external state to change. Interval auto-tunes off the
+// elapsed time since mount: 30s under an hour, 60s under a day, 1h beyond.
+// (Earlier version mistakenly compared Date.now() against 1h / 24h, which
+// is meaningless for absolute epoch ms — result was always 1h.)
+export function useNow(): Date {
+  const [now, setNow] = useState<Date>(() => new Date())
+  useEffect(() => {
+    const mountedAt = Date.now()
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const tick = () => {
+      setNow(new Date())
+      const elapsed = Date.now() - mountedAt
+      const next = elapsed < 60 * 60 * 1000
+        ? 30_000
+        : elapsed < 24 * 60 * 60 * 1000
+          ? 60_000
+          : 3_600_000
+      timer = setTimeout(tick, next)
+    }
+    timer = setTimeout(tick, 30_000)
+    return () => {
+      if (timer) clearTimeout(timer)
+    }
+  }, [])
+  return now
 }

@@ -1,5 +1,5 @@
 import { useState, useEffect, useContext } from 'react'
-import type { Settings, SyncPeer } from '../types'
+import type { Settings, SyncPeer } from '../types/clipboard'
 import { I18nContext, type Locale } from '../utils/i18n'
 
 type SettingsPanelProps = {
@@ -24,18 +24,73 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
   const [newApp, setNewApp] = useState('')
   const [newPattern, setNewPattern] = useState('')
   const [showClearConfirm, setShowClearConfirm] = useState(false)
-  const [activeTab, setActiveTab] = useState<'general' | 'exclusions' | 'sync'>('general')
+  const [activeTab, setActiveTab] = useState<'general' | 'exclusions' | 'sync' | 'updates'>('general')
+  const [updateAvailable, setUpdateAvailable] = useState<{ version?: string } | null>(null)
+  const [updateDownloaded, setUpdateDownloaded] = useState<{ version?: string } | null>(null)
+  const [updateProgress, setUpdateProgress] = useState<{ percent: number } | null>(null)
+  const [updateNone, setUpdateNone] = useState(false)
+  const [updateError, setUpdateError] = useState<string | null>(null)
+  const [updateChecking, setUpdateChecking] = useState(false)
 
   useEffect(() => {
     window.electronAPI.getSettings().then(setSettings)
     window.electronAPI.getStats().then(setStats)
     window.electronAPI.getSyncPeers().then(setPeers)
-  }, [])
+    const unsubAvail = window.electronAPI.onUpdateAvailable((info) => {
+      const maybe = info as { version?: string }
+      setUpdateChecking(false)
+      setUpdateAvailable({ version: maybe?.version })
+      setUpdateDownloaded(null)
+      setUpdateNone(false)
+      setUpdateError(null)
+    })
+    const unsubNone = window.electronAPI.onUpdateNotAvailable(() => {
+      // Only surface "you're up to date" if the user explicitly asked;
+      // auto-checks at startup stay silent to avoid banner noise.
+      setUpdateChecking(false)
+      if (updateChecking) setUpdateNone(true)
+      setUpdateAvailable(null)
+    })
+    const unsubProgress = window.electronAPI.onUpdateDownloadProgress((p) => {
+      const maybe = p as { percent?: number }
+      if (typeof maybe?.percent === 'number') setUpdateProgress({ percent: maybe.percent })
+    })
+    const unsubDl = window.electronAPI.onUpdateDownloaded((info) => {
+      const maybe = info as { version?: string }
+      setUpdateDownloaded({ version: maybe?.version })
+      setUpdateProgress(null)
+    })
+    const unsubErr = window.electronAPI.onUpdateError((err) => {
+      setUpdateError(err?.message ?? 'Update check failed')
+      setUpdateChecking(false)
+      setUpdateProgress(null)
+    })
+    return () => { unsubAvail(); unsubNone(); unsubProgress(); unsubDl(); unsubErr() }
+  }, [updateChecking])
 
-  const update = (key: keyof Settings, value: string | number | boolean | string[]) => {
+  const handleCheckForUpdate = () => {
+    setUpdateChecking(true)
+    setUpdateError(null)
+    setUpdateNone(false)
+    setUpdateAvailable(null)
+    setUpdateDownloaded(null)
+    setUpdateProgress(null)
+    window.electronAPI.checkForUpdate()
+    // If neither available nor not-available nor error fires within 30s,
+    // reset the spinner — autoUpdater silently no-ops when the publish
+    // provider is unreachable on some networks, and the UI shouldn't stay
+    // stuck in "Checking…" forever.
+    window.setTimeout(() => setUpdateChecking(false), 30_000)
+  }
+
+  const update = <K extends keyof Settings>(key: K, value: Settings[K]) => {
     const updated = { ...settings, [key]: value }
     setSettings(updated)
-    window.electronAPI.updateSettings({ [key]: typeof value === 'object' ? JSON.stringify(value) : String(value) })
+    // Pass the raw value through; the worker is responsible for serialising
+    // object values to its settings-store format. Centralising this avoids
+    // subtle drift between renderer and main about what "an object setting"
+    // looks like.
+    window.electronAPI.updateSettings({ [key]: value } as Partial<Settings>)
     if (key === 'theme') {
       document.documentElement.setAttribute('data-theme', value as string)
     }
@@ -108,6 +163,24 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
         <button className="action-btn back" onClick={onClose}>&larr; {t('settings.back')}</button>
       </div>
 
+      {(updateAvailable || updateDownloaded) && (
+        <div className="update-banner" role="status">
+          <span>
+            {updateDownloaded
+              ? `✓ v${updateDownloaded.version || updateAvailable?.version || '?'} ${t('settings.update_ready')}`
+              : `↓ v${updateAvailable?.version || '?'} ${t('settings.update_available')}`}
+          </span>
+          {updateDownloaded && (
+            <button
+              className="filter-chip"
+              onClick={() => window.electronAPI.applyUpdate()}
+            >
+              {t('settings.update_restart')}
+            </button>
+          )}
+        </div>
+      )}
+
       <div className="settings-tabs">
         <button
           className={`tab ${activeTab === 'general' ? 'active' : ''}`}
@@ -121,6 +194,10 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
           className={`tab ${activeTab === 'sync' ? 'active' : ''}`}
           onClick={() => setActiveTab('sync')}
         >{t('settings.sync')}</button>
+        <button
+          className={`tab ${activeTab === 'updates' ? 'active' : ''}`}
+          onClick={() => setActiveTab('updates')}
+        >{t('settings.update_section')}</button>
       </div>
 
       {activeTab === 'general' && (
@@ -168,7 +245,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
             <label className="settings-label">{t('settings.theme')}</label>
             <select
               value={settings.theme}
-              onChange={(e) => update('theme', e.target.value)}
+              onChange={(e) => update('theme', e.target.value as Settings['theme'])}
             >
               <option value="dark">{t('settings.theme_dark')}</option>
               <option value="light">{t('settings.theme_light')}</option>
@@ -295,6 +372,66 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
               </div>
             )}
           </div>
+        </>
+      )}
+
+      {activeTab === 'updates' && (
+        <>
+          <div className="settings-group">
+            <label className="settings-label">{t('settings.update_section')}</label>
+            <button
+              className="filter-chip"
+              onClick={handleCheckForUpdate}
+              disabled={updateChecking}
+            >
+              {updateChecking ? t('settings.update_checking') : t('settings.update_check')}
+            </button>
+          </div>
+
+          {updateNone && (
+            <div className="update-banner" role="status">
+              <span>✓ {t('settings.update_none')}</span>
+            </div>
+          )}
+
+          {updateError && (
+            <div className="update-banner update-banner-error" role="alert">
+              <span>⚠ {t('settings.update_error')}: {updateError}</span>
+            </div>
+          )}
+
+          {updateAvailable && !updateDownloaded && (
+            <div className="update-banner" role="status">
+              <span>
+                ↓ v{updateAvailable.version || '?'}{' '}
+                {updateProgress
+                  ? t('settings.update_progress', { p: Math.floor(updateProgress.percent) })
+                  : t('settings.update_available')}
+              </span>
+            </div>
+          )}
+
+          {updateProgress && !updateDownloaded && (
+            <div className="update-progress" role="progressbar"
+                 aria-valuenow={Math.floor(updateProgress.percent)}
+                 aria-valuemin={0} aria-valuemax={100}>
+              <div className="update-progress-bar" style={{ width: `${updateProgress.percent}%` }} />
+            </div>
+          )}
+
+          {updateDownloaded && (
+            <div className="update-banner" role="status">
+              <span>
+                ✓ v{updateDownloaded.version || '?'} {t('settings.update_ready')}
+              </span>
+              <button
+                className="filter-chip"
+                onClick={() => window.electronAPI.applyUpdate()}
+              >
+                {t('settings.update_restart')}
+              </button>
+            </div>
+          )}
         </>
       )}
     </div>

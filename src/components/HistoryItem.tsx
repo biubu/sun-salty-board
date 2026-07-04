@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react'
-import { ClipboardItem } from '../App'
-import { useI18n } from '../utils/i18n'
+import { useState, useEffect, useMemo } from 'react'
+import { ClipboardItem } from '../types/clipboard'
+import { useI18n, useNow } from '../utils/i18n'
+import { imageRef, imageUnref } from '../utils/imageUrl'
 
 type HistoryItemProps = {
   item: ClipboardItem
@@ -12,8 +13,27 @@ type HistoryItemProps = {
 
 export default function HistoryItem({ item, isActive, onSelect, onDelete, onToggleFavorite }: HistoryItemProps) {
   const { t } = useI18n()
+  const now = useNow()
   const [showUndo, setShowUndo] = useState(false)
   const [deletedId, setDeletedId] = useState<number | null>(null)
+
+  // Build the blob URL once per buffer reference; cleanup revokes when this
+  // row is unmounted. This keeps memory bounded across long copy/paste
+  // sessions where each row would otherwise spawn a fresh data: URL.
+  const imageSrc = useMemo(() => {
+    const buf = item.imageData
+    if (!buf || item.dataType !== 'image') return null
+    const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf)
+    return imageRef(bytes, item.imageMime)
+  }, [item.imageData, item.imageMime, item.dataType])
+
+  useEffect(() => {
+    if (!imageSrc) return
+    const buf = item.imageData
+    if (!buf) return
+    const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf)
+    return () => imageUnref(bytes)
+  }, [imageSrc, item.imageData])
 
   useEffect(() => {
     if (!showUndo || deletedId === null) return
@@ -26,9 +46,18 @@ export default function HistoryItem({ item, isActive, onSelect, onDelete, onTogg
 
   const formatTime = (dateStr: string) => {
     const normalized = dateStr.includes('T') ? dateStr : dateStr.replace(' ', 'T')
-    const date = new Date(normalized + 'Z')
-    const now = new Date()
-    const diffMs = now.getTime() - date.getTime()
+    // DB stores created_at in UTC via SQLite's strftime(... 'now'), which is
+    // UTC by definition. Parse as UTC; fall back to local interpretation if
+    // the timestamp already carries an explicit offset.
+    const date = /[Zz]|[+-]\d{2}:?\d{2}$/.test(normalized)
+      ? new Date(normalized)
+      : new Date(normalized + 'Z')
+    const ts = date.getTime()
+    if (Number.isNaN(ts)) return ''
+    const diffMs = now.getTime() - ts
+    // Future timestamps (clock skew, local DB writes) clamp to "just now"
+    // rather than producing negative minute counts.
+    if (diffMs < 0) return t('item.just_now')
     const diffMin = Math.floor(diffMs / 60000)
     if (diffMin < 1) return t('item.just_now')
     if (diffMin < 60) return t('item.min_ago', { n: diffMin })
@@ -37,12 +66,9 @@ export default function HistoryItem({ item, isActive, onSelect, onDelete, onTogg
     return date.toLocaleDateString()
   }
 
-  const typeLabel = item.dataType === 'richtext' ? t('item.rich_text')
+  const typeLabel = item.dataType === 'richtext'
+    ? t('item.rich_text')
     : item.dataType.charAt(0).toUpperCase() + item.dataType.slice(1)
-
-  const imageSrc = item.imageData
-    ? `data:image/png;base64,${arrayBufferToBase64(item.imageData)}`
-    : null
 
   const handleDelete = (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -71,10 +97,14 @@ export default function HistoryItem({ item, isActive, onSelect, onDelete, onTogg
     <div className={`history-item${isActive ? ' active' : ''}`} onClick={() => onSelect(item)}>
       <div className="history-item-content">
         {item.dataType === 'image' && imageSrc ? (
-          <img className="history-item-image" src={imageSrc} alt="Clipboard" />
+          <img className="history-item-image" src={imageSrc} alt="Clipboard" loading="lazy" />
         ) : item.dataType === 'files' ? (
           <div className="history-item-files">
-            <div className="history-item-text">{(item.filePaths?.length ?? 0) > 1 ? t('item.files_count', { n: item.filePaths?.length ?? 0 }) : (item.filePaths?.[0]?.split('/').pop() ?? '')}</div>
+            <div className="history-item-text">
+              {(item.filePaths?.length ?? 0) > 1
+                ? t('item.files_count', { n: item.filePaths?.length ?? 0 })
+                : (item.filePaths?.[0]?.split('/').pop() ?? '')}
+            </div>
           </div>
         ) : (
           <div className="history-item-text">{item.content.substring(0, 200)}</div>
@@ -110,13 +140,4 @@ export default function HistoryItem({ item, isActive, onSelect, onDelete, onTogg
       </div>
     </div>
   )
-}
-
-function arrayBufferToBase64(buffer: number[] | Uint8Array): string {
-  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer)
-  let binary = ''
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i])
-  }
-  return btoa(binary)
 }

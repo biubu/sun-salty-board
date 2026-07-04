@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { FilterType } from '../App'
-import type { Category } from '../types'
+import type { Category } from '../types/clipboard'
 import { useI18n } from '../utils/i18n'
 
 const FILTERS: { key: FilterType; i18nKey: string }[] = [

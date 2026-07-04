@@ -4,27 +4,16 @@ import SearchBar from './components/SearchBar'
 import FilterChips from './components/FilterChips'
 import SettingsPanel from './components/SettingsPanel'
 import { I18nContext, type Locale } from './utils/i18n'
-import type { Settings } from './types'
-
-export interface ClipboardItem {
-  id: number
-  content: string
-  contentHtml?: string
-  dataType: 'text' | 'richtext' | 'image' | 'files'
-  imageData?: number[]
-  filePaths?: string[]
-  sourceApp?: string
-  sourceDevice?: string
-  categoryIds: number[]
-  isFavorite: boolean
-  createdAt: string
-}
+import type { ClipboardItem } from './types/clipboard'
 
 export type FilterType = 'all' | 'text' | 'richtext' | 'image' | 'files' | 'favorites'
 
 export default function App() {
   const [items, setItems] = useState<ClipboardItem[]>([])
   const [searchQuery, setSearchQuery] = useState('')
+  // Debounced query that drives the (possibly IPC-backed) filter pipeline.
+  // Keeping the raw `searchQuery` lets the <input> stay responsive on every keystroke.
+  const [debouncedQuery, setDebouncedQuery] = useState('')
   const [activeFilter, setActiveFilter] = useState<FilterType>('all')
   const [selectedCategoryId, setSelectedCategoryId] = useState<number | null>(null)
   const [selectedIndex, setSelectedIndex] = useState(0)
@@ -41,16 +30,22 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    window.electronAPI.getSettings().then((s: Settings) => {
+    window.electronAPI.getSettings().then((s) => {
       document.documentElement.setAttribute('data-theme', s.theme)
-      setLocale(s.locale as Locale || 'en')
+      setLocale((s.locale as Locale) || 'en')
     })
   }, [setLocale])
 
+  // 200ms debounce so a fast typist doesn't refilter the whole list on every keystroke.
+  useEffect(() => {
+    const id = setTimeout(() => setDebouncedQuery(searchQuery), 200)
+    return () => clearTimeout(id)
+  }, [searchQuery])
+
   const filteredItems = useMemo(() => {
     let result = items
-    if (searchQuery) {
-      const q = searchQuery.toLowerCase()
+    if (debouncedQuery) {
+      const q = debouncedQuery.toLowerCase()
       result = result.filter((item) => item.content.toLowerCase().includes(q))
     }
     if (activeFilter === 'favorites') {
@@ -64,14 +59,20 @@ export default function App() {
       result = result.filter((item) => item.categoryIds.includes(selectedCategoryId))
     }
     return result
-  }, [items, searchQuery, activeFilter, selectedCategoryId])
+  }, [items, debouncedQuery, activeFilter, selectedCategoryId])
+
+  // Reset selection when filters change so we never point past the end of the list.
+  useEffect(() => {
+    setSelectedIndex((i) => (i >= filteredItems.length ? 0 : i))
+  }, [filteredItems.length])
 
   const filteredRef = useRef(filteredItems)
   filteredRef.current = filteredItems
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement).tagName === 'INPUT') return
+      const target = e.target as HTMLElement | null
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return
       if (e.key >= '1' && e.key <= '9') {
         window.electronAPI.pasteByIndex(parseInt(e.key, 10))
       } else if (e.key === 'ArrowUp') {

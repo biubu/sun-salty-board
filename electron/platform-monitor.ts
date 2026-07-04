@@ -1,4 +1,5 @@
 import { clipboard, nativeImage } from 'electron'
+import fs from 'fs'
 
 export interface ClipboardEvent {
   content: string
@@ -55,27 +56,73 @@ function isDuplicate(): boolean {
 
 function readFileListFromClipboard(): string[] {
   const formats = clipboard.availableFormats()
-  const fileFormats = formats.filter(f =>
-    f.includes('FileName') || f.includes('public.file-url') || f === 'NSFilenamesPboardType',
-  )
+  // Match every known file-reference format across platforms:
+  //   macOS:   public.file-url, NSFilenamesPboardType, dyn.* UTIs
+  //   Windows: FileName, FileNameW (CF_FILENAME / CF_FILENAMEW)
+  //   Linux:   text/uri-list
+  // We lowercase before matching so platform casing differences (e.g.
+  // NSFilenamesPboardType vs. nsfilenamespboardtype) don't slip through.
+  const fileFormats = formats.filter((f) => {
+    const fl = f.toLowerCase()
+    return fl.includes('filename')
+      || fl.includes('file-url')
+      || fl === 'nsfilenamespboardtype'
+      || fl === 'text/uri-list'
+  })
   if (fileFormats.length === 0) return []
   const paths: string[] = []
   for (const fmt of fileFormats) {
     try {
       const buf = clipboard.readBuffer(fmt)
       if (!buf) continue
-      const str = buf.toString('utf8')
-      if (fmt === 'public.file-url') {
-        const urls = str.split('\n').filter(Boolean)
+      const str = buf.toString('utf8').replace(/\0/g, '')
+      if (str.trim().length === 0) continue
+      const fl = fmt.toLowerCase()
+      if (fl === 'text/uri-list' || fl.includes('file-url') || fl === 'nsfilenamespboardtype') {
+        // URI list (one URL per line, possibly file:// scheme).
+        const urls = str.split(/[\r\n]+/).filter(Boolean)
         for (const url of urls) {
-          try { paths.push(decodeURIComponent(url.replace(/^file:\/\//, ''))) } catch {}
+          try {
+            let p = url.trim()
+            if (p.toLowerCase().startsWith('file://')) {
+              p = decodeURIComponent(p.replace(/^file:\/\//i, ''))
+            }
+            if (p) paths.push(p)
+          } catch {}
         }
-      } else if (fmt.startsWith('FileName')) {
-        paths.push(str.replace(/\0/g, ''))
+      } else if (fl.includes('filename')) {
+        // Windows CF_FILENAME / CF_FILENAMEW only carries the bare filename,
+        // not a full path — promote to a path only when it actually looks
+        // like one (otherwise we'd inject garbage like "Document.docx").
+        if (/[\\/]/.test(str) || /^[A-Za-z]:/.test(str)) {
+          paths.push(str)
+        }
       }
     } catch {}
   }
   return [...new Set(paths)]
+}
+
+// Heuristic: a single text line that starts with a path-like prefix and
+// resolves on disk is almost always a file copy that didn't expose any
+// standard file-reference format (e.g. pbcopy, some CLI tools, terminal
+// drag-and-drop on Linux). Without this fallback those copies get buried
+// under image / text.
+function looksLikeExistingFilePath(text: string): string | null {
+  const trimmed = text.trim()
+  if (!trimmed) return null
+  if (/\s/.test(trimmed)) return null
+  if (trimmed.length > 4096) return null
+  const isPathLike = trimmed.startsWith('/')
+    || trimmed.startsWith('~/')
+    || /^[A-Za-z]:[\\/]/.test(trimmed)
+    || trimmed.startsWith('./')
+    || trimmed.startsWith('../')
+  if (!isPathLike) return null
+  try {
+    if (fs.existsSync(trimmed) && fs.statSync(trimmed).isFile()) return trimmed
+  } catch {}
+  return null
 }
 
 function poll(): void {
@@ -83,6 +130,9 @@ function poll(): void {
   const currentHtml = clipboard.readHTML()
   const currentImage = clipboard.readImage()
   const currentFiles = readFileListFromClipboard()
+  // Decode the PNG once up front so both the text→file fallback (1b) and the
+  // image branch (2) can inspect it without re-reading from the OS clipboard.
+  const currentImagePng = currentImage.isEmpty() ? null : currentImage.toPNG()
 
   if (isDuplicate()) return
 
@@ -106,8 +156,27 @@ function poll(): void {
     return
   }
 
+  // 1b. text fallback: a bare text payload that resolves to an existing file
+  //     path is still a file copy. Catch it before we drop into image / text.
+  if (!currentImagePng && currentText && currentText !== lastText) {
+    const filePath = looksLikeExistingFilePath(currentText)
+    if (filePath) {
+      lastText = currentText
+      lastFiles = [filePath]
+      if (!isExcluded('', filePath)) {
+        onEvent?.({
+          content: filePath,
+          dataType: 'files',
+          filePaths: [filePath],
+          sourceApp: '',
+          sensitive: ctrlDown,
+        })
+      }
+      return
+    }
+  }
+
   // 2. image
-  const currentImagePng = currentImage.isEmpty() ? null : currentImage.toPNG()
   if (currentImagePng && (!lastImageBuf || !currentImagePng.equals(lastImageBuf))) {
     lastImageBuf = currentImagePng
     onEvent?.({

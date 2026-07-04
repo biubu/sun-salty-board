@@ -3,7 +3,23 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;" />
+    <!--
+      Content-Security-Policy
+      ─────────────────────────────────────────────────────────────────────
+      * default-src 'self' — only same-origin resources by default.
+      * script-src: 'self' (production); dev adds 'unsafe-eval' and ws://*
+        because Vite's HMR runs ESM with eval + WebSocket reloads on
+        localhost. Relaxing only in dev keeps production hardened.
+      * style-src 'unsafe-inline' — inline style attributes are set by
+        react-window's FixedSizeList rows for absolute positioning.
+      * img-src includes blob: to allow the in-memory image previews
+        produced via URL.createObjectURL (no external network requests).
+      * connect-src mirrors what Vite needs for HMR in dev.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws://localhost:* http://localhost:*"
+    />
     <title>SunSaltyBoard</title>
   </head>
   <body>

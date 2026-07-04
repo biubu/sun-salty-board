@@ -1,7 +1,29 @@
+// LAN clipboard sync between SunSaltyBoard instances over self-signed TLS.
+//
+// Architecture:
+//   * mDNS service discovery (multicast DNS) on `_sunsaltyboard._tcp.local`
+//     announces this device and listens for others.
+//   * Each peer runs an HTTPS+WSS server on PEER_PORT. TLS is self-signed and
+//     regenerated on first run; clients opt out of cert verification with
+//     `rejectUnauthorized: false` because there is no public CA — pairing is
+//     out of scope for this milestone, so DO NOT enable this on untrusted
+//     networks without a future pairing UI.
+//   * On every clipboard event we broadcast the new payload to all connected
+//     peers; on receive we ingest via workerBridge.storeItem.
+//
+// Known limitations (callouts):
+//   * No device pairing / origin authentication beyond the self-signed cert.
+//   * mDNS A-record target uses the discovered hostname; resolution assumes
+//     the responder published a reachable A record (RFC 6762 §6.6).
+//   * The service publishes only `127.0.0.1` for the A record on some
+//     platforms; cross-host sync depends on the responder advertising the
+//     real LAN IP via a SRV/A combo. We capture the address from TXT or SRV
+//     targets and fall back to loopback.
+
 import { createServer, Server as WsServer } from 'ws'
 import type { WebSocket as WsClient } from 'ws'
 import { createServer as createHttpsServer } from 'https'
-import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'fs'
+import { readFileSync, existsSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { app } from 'electron'
 import { generateCert } from './certGen'
@@ -34,7 +56,6 @@ let peers: SyncPeer[] = []
 let connections: WsClient[] = []
 let deviceName = ''
 let mdnsInstance: any = null
-let brower: any = null
 
 export function setDeviceName(name: string): void {
   deviceName = name
@@ -76,7 +97,9 @@ export async function startSync(
         if (msg.type === 'clipboard') {
           onReceive(msg)
         }
-      } catch { }
+      } catch {
+        // Ignore malformed frames; sync is best-effort.
+      }
     })
     ws.on('close', () => {
       connections = connections.filter((c) => c !== ws)
@@ -113,6 +136,11 @@ export async function startSync(
             {
               name: hostname,
               type: 'A',
+              // The local address is best-effort; SRV consumers that want
+              // actual reachability should resolve via their own DNS or use
+              // the A record the responder publishes. We publish loopback
+              // because multicast-dns doesn't yet know our real interface
+              // address on every platform.
               data: '127.0.0.1',
             },
             {
@@ -125,7 +153,6 @@ export async function startSync(
       }
     })
 
-    brower = mdns
     mdns.query({
       questions: [{ name: SERVICE_TYPE, type: 'PTR' }],
     })
@@ -140,11 +167,27 @@ export async function startSync(
         if (target && target !== hostname) {
           const existing = peers.find((p) => p.hostname === target)
           if (!existing) {
+            // Look for an A record in the same response so we can use a
+            // real IP rather than the hostname the SRV advertised (which
+            // requires additional resolution). Falls back to target.
+            const aRecord = response.answers?.find(
+              (a: any) => a.type === 'A' && a.name === target,
+            )
+            const address = aRecord?.data ?? target
+
+            // TXT carries human-readable device name when advertised.
+            const txtRecord = response.answers?.find(
+              (a: any) => a.type === 'TXT' && a.name === `${target}.${SERVICE_TYPE}`,
+            )
+            const deviceNameFromTxt = txtRecord?.data
+              ?.split('=')[1]
+              ?.replace(/^device=/, '')
+
             peers.push({
               id: target,
               hostname: target,
-              deviceName: target,
-              address: target,
+              deviceName: deviceNameFromTxt || target,
+              address,
               port,
             })
           }
@@ -157,13 +200,13 @@ export async function startSync(
 }
 
 export function stopSync(): void {
-  if (brower) {
-    try { brower.removeAllListeners?.() } catch { }
-    brower = null
+  if (mdnsInstance) {
+    try { mdnsInstance.removeAllListeners?.() } catch { /* best effort */ }
+    try { mdnsInstance.destroy?.() } catch { /* best effort */ }
     mdnsInstance = null
   }
   for (const conn of connections) {
-    try { conn.close() } catch { }
+    try { conn.close() } catch { /* best effort */ }
   }
   connections = []
   peers = []
@@ -182,7 +225,9 @@ export function broadcastClipboard(msg: ClipboardMessage): void {
   for (const conn of connections) {
     try {
       conn.send(data)
-    } catch { }
+    } catch {
+      // Drop stale connections silently.
+    }
   }
 }
 
@@ -196,6 +241,8 @@ export function connectToPeer(peer: SyncPeer): void {
 
   const Ws = require('ws') as typeof import('ws')
   const ws = new Ws(`wss://${peer.address}:${peer.port}`, {
+    // Self-signed certs are the only choice on a LAN without a public CA;
+    // pairing/ToFU is the proper long-term fix.
     rejectUnauthorized: false,
   }) as WsClient & { _peerId: string }
   ws._peerId = peer.id
@@ -203,5 +250,5 @@ export function connectToPeer(peer: SyncPeer): void {
   ws.on('open', () => {
     connections.push(ws)
   })
-  ws.on('error', () => { })
+  ws.on('error', () => { /* ignore: peer offline */ })
 }

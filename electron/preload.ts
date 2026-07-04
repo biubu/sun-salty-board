@@ -46,9 +46,27 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('update-available', handler)
     return () => ipcRenderer.removeListener('update-available', handler)
   },
-  onUpdateDownloaded: (callback: () => void) => {
-    const handler = () => callback()
+  onUpdateNotAvailable: (callback: (info: unknown) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, info: unknown) => callback(info)
+    ipcRenderer.on('update-not-available', handler)
+    return () => ipcRenderer.removeListener('update-not-available', handler)
+  },
+  onUpdateDownloadProgress: (callback: (progress: unknown) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, progress: unknown) => callback(progress)
+    ipcRenderer.on('update-download-progress', handler)
+    return () => ipcRenderer.removeListener('update-download-progress', handler)
+  },
+  onUpdateDownloaded: (callback: (info: unknown) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, info: unknown) => callback(info)
     ipcRenderer.on('update-downloaded', handler)
     return () => ipcRenderer.removeListener('update-downloaded', handler)
   },
+  onUpdateError: (callback: (err: { message: string }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, err: { message: string }) => callback(err)
+    ipcRenderer.on('update-error', handler)
+    return () => ipcRenderer.removeListener('update-error', handler)
+  },
+  checkForUpdate: () => ipcRenderer.send('check-for-update'),
+  downloadUpdate: () => ipcRenderer.send('download-update'),
+  applyUpdate: () => ipcRenderer.send('apply-update'),
 })
