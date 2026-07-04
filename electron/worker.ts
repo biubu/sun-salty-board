@@ -233,10 +233,40 @@ function ensureSchema(): void {
   stmts.createCategories.run()
   stmts.createItemCategories.run()
   stmts.createSettings.run()
+
+  // FTS5 reconstruction. The `CREATE VIRTUAL TABLE IF NOT EXISTS ... USING
+  // fts5(...)` form is a no-op whenever an items_fts table already exists,
+  // regardless of its schema, so a database upgraded from v1.x would keep
+  // its FTS4 items_fts table — single-column `(content)` only — while our
+  // triggers would silently try to use FTS5 syntax against it. The first
+  // UPDATE on items (most often toggle-favorite, the star icon on every
+  // history row) would fire items_fts_au, the AU trigger's
+  // `INSERT INTO fts(fts, rowid, ...) VALUES ('delete', ...)` is FTS5-only,
+  // and SQLite returns "SQL logic error" — packaged builds crashed at the
+  // IPC handler for paste-favorite with no SQL-level guard above to catch
+  // it.
+  //
+  // Always rebuild: drop the legacy table + triggers, recreate as FTS5,
+  // then backfill from items in one shot. The backfill bypasses the AI/AD
+  // triggers (we INSERT directly into items_fts, so they only fire on
+  // future user-initiated changes). Cost is O(N log N) on a fresh boot — a
+  // few hundred ms even for very large histories — and the result is a
+  // correct index from day one.
+  db.exec(`DROP TABLE IF EXISTS items_fts`)
+  db.exec(`DROP TRIGGER IF EXISTS items_fts_ai`)
+  db.exec(`DROP TRIGGER IF EXISTS items_fts_au`)
+  db.exec(`DROP TRIGGER IF EXISTS items_fts_ad`)
   stmts.createItemsFts.run()
   stmts.createItemsFtsAi.run()
   stmts.createItemsFtsAu.run()
   stmts.createItemsFtsAd.run()
+  // IFNULL on content_html matches the items table's nullable column;
+  // FTS5 won't store NULL in an indexed column and we want the index to
+  // see whatever the canonical items row would later feed it.
+  db.exec(`
+    INSERT INTO items_fts(rowid, content, content_html)
+    SELECT id, content, IFNULL(content_html, '') FROM items
+  `)
 
   // Migrate: image_mime column may be missing on databases created before v1.2.x.
   // better-sqlite3 returns an array of column descriptors from PRAGMA.

@@ -105,18 +105,17 @@ function createTray(): void {
   // app icon would render as a solid blob once setTemplateImage(true) drops
   // its RGB channels and keeps only the (fully opaque) alpha mask.
   //
-  // Tray resources ship inside app.asar (electron-builder.yml \`files\` glob
-  // includes resources/**\*), so __dirname reaches them in both dev and
-  // production. process.resourcesPath is the more conventional prod path
-  // for non-asar'd files; the dev branch keeps the historical __dirname
-  // resolve so the same tree shape works without an electron-builder run.
+  // Tray icons live inside app.asar (`files: resources/**\*` in
+  // electron-builder.yml bundles them). Electron's asar shim rewrites reads
+  // from inside the archive, including nativeImage.createFromPath, so the
+  // same __dirname-relative path works in dev and in the packaged .app.
+  // The previous dual-branch pointed process.resourcesPath at a tree shape
+  // that doesn't exist post-packaging — only app.asar, app.asar.unpacked,
+  // and .icns live there — and the icon silently rendered as an empty
+  // bitmap, leaving the tray slot blank.
   const iconPath = process.platform === 'darwin'
-    ? (isDev
-        ? path.join(__dirname, '../resources/trayIconTemplate.png')
-        : path.join(process.resourcesPath, 'resources/trayIconTemplate.png'))
-    : (isDev
-        ? path.join(__dirname, '../resources/icon.png')
-        : path.join(process.resourcesPath, 'resources/icon.png'))
+    ? path.join(__dirname, '../resources/trayIconTemplate.png')
+    : path.join(__dirname, '../resources/icon.png')
   const icon = nativeImage.createFromPath(iconPath)
   if (process.platform === 'darwin') {
     icon.setTemplateImage(true)
