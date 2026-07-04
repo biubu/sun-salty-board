@@ -18,7 +18,7 @@ export default function App() {
   const [selectedCategoryId, setSelectedCategoryId] = useState<number | null>(null)
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [showSettings, setShowSettings] = useState(false)
-  const { setLocale } = useContext(I18nContext)
+  const { t, setLocale } = useContext(I18nContext)
   const selectedIndexRef = useRef(selectedIndex)
   selectedIndexRef.current = selectedIndex
 
@@ -74,7 +74,11 @@ export default function App() {
       const target = e.target as HTMLElement | null
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return
       if (e.key >= '1' && e.key <= '9') {
+        // Renderer passes the raw digit; main.ts treats the value as a
+        // 1-based position so "press 1 → paste first item".
         window.electronAPI.pasteByIndex(parseInt(e.key, 10))
+      } else if (e.key === '0') {
+        window.electronAPI.pasteByIndex(0)
       } else if (e.key === 'ArrowUp') {
         e.preventDefault()
         setSelectedIndex((i) => (i > 0 ? i - 1 : filteredRef.current.length - 1))
@@ -98,7 +102,20 @@ export default function App() {
   return (
     <div className="app-container">
       <header className="app-header">
-        <SearchBar value={searchQuery} onChange={setSearchQuery} />
+        <div className="app-header-row">
+          <SearchBar value={searchQuery} onChange={setSearchQuery} />
+          <button
+            className="settings-btn"
+            onClick={() => setShowSettings(true)}
+            title={t('settings.title')}
+            aria-label={t('settings.title')}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+          </button>
+        </div>
         <FilterChips
           activeFilter={activeFilter}
           onFilterChange={setActiveFilter}
@@ -112,12 +129,15 @@ export default function App() {
           selectedIndex={selectedIndex}
           onSelect={(item) => window.electronAPI.pasteItem(item.id)}
           onDelete={(id) => {
+            // delete-item IPC handler pushes a `history-update` broadcast,
+            // which the App-level onHistoryUpdate subscription above already
+            // applies to setItems. An explicit getHistory() here would race
+            // with that push and is unnecessary.
             window.electronAPI.deleteItem(id)
-            window.electronAPI.getHistory().then(setItems)
           }}
           onToggleFavorite={(id) => {
+            // Same as onDelete — toggle-favorite pushes history-update.
             window.electronAPI.toggleFavorite(id)
-            window.electronAPI.getHistory().then(setItems)
           }}
         />
       </main>

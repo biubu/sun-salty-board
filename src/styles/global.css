@@ -59,6 +59,48 @@ body {
   -webkit-app-region: drag;
 }
 
+/* Settings button sits inline next to the search field. The button itself
+   needs -webkit-app-region: no-drag so it actually receives clicks; the
+   surrounding header is draggable so the overlay can be repositioned by
+   dragging the top edge. */
+.app-header-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.app-header-row .search-bar {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+  -webkit-app-region: no-drag;
+}
+
+.settings-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
+
+.settings-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 .app-main {
   flex: 1;
   overflow: hidden;
