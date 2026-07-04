@@ -26,6 +26,10 @@ export interface UndoEntry {
   source_device: string | null
   is_favorite: number
   created_at: string
+  // Category associations captured at delete-time. Stored as a comma-separated
+  // list of ids so the JSON-shaped IPC payload stays simple (sql.js binds
+  // arrays as TEXT); worker.ts parses it back when undoing.
+  category_ids: number[]
 }
 
 const UNDO_WINDOW_MS = 5_000
@@ -87,5 +91,6 @@ export function clipboardItemToUndoEntry(item: ClipboardItem): UndoEntry {
     source_device: item.sourceDevice ?? null,
     is_favorite: item.isFavorite ? 1 : 0,
     created_at: item.createdAt,
+    category_ids: item.categoryIds ?? [],
   }
 }
