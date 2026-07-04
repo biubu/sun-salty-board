@@ -1,17 +1,20 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useContext } from 'react'
 import type { Settings, SyncPeer } from '../types'
+import { I18nContext, type Locale } from '../utils/i18n'
 
 type SettingsPanelProps = {
   onClose: () => void
 }
 
 export default function SettingsPanel({ onClose }: SettingsPanelProps) {
+  const { t, locale, setLocale } = useContext(I18nContext)
   const [settings, setSettings] = useState<Settings>({
     maxItems: 10000,
     hotkey: 'Alt+Shift+V',
     expirationDays: 30,
     syncEnabled: false,
     theme: 'dark',
+    locale: 'en',
     exclusionApps: [],
     exclusionPatterns: [],
   })
@@ -33,6 +36,12 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
     const updated = { ...settings, [key]: value }
     setSettings(updated)
     window.electronAPI.updateSettings({ [key]: typeof value === 'object' ? JSON.stringify(value) : String(value) })
+    if (key === 'theme') {
+      document.documentElement.setAttribute('data-theme', value as string)
+    }
+    if (key === 'locale') {
+      setLocale(value as Locale)
+    }
   }
 
   const startHotkeyListen = () => {
@@ -95,29 +104,29 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
   return (
     <div className="settings-panel">
       <div className="settings-header">
-        <h1>Settings</h1>
-        <button className="action-btn back" onClick={onClose}>&larr; Back</button>
+        <h1>{t('settings.title')}</h1>
+        <button className="action-btn back" onClick={onClose}>&larr; {t('settings.back')}</button>
       </div>
 
       <div className="settings-tabs">
         <button
           className={`tab ${activeTab === 'general' ? 'active' : ''}`}
           onClick={() => setActiveTab('general')}
-        >General</button>
+        >{t('settings.general')}</button>
         <button
           className={`tab ${activeTab === 'exclusions' ? 'active' : ''}`}
           onClick={() => setActiveTab('exclusions')}
-        >Exclusions</button>
+        >{t('settings.exclusions')}</button>
         <button
           className={`tab ${activeTab === 'sync' ? 'active' : ''}`}
           onClick={() => setActiveTab('sync')}
-        >Sync</button>
+        >{t('settings.sync')}</button>
       </div>
 
       {activeTab === 'general' && (
         <>
           <div className="settings-group">
-            <label className="settings-label">Maximum items</label>
+            <label className="settings-label">{t('settings.max_items')}</label>
             <input
               type="range"
               min={100}
@@ -130,7 +139,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
           </div>
 
           <div className="settings-group">
-            <label className="settings-label">Expiration (days)</label>
+            <label className="settings-label">{t('settings.expiration')}</label>
             <input
               type="number"
               min={1}
@@ -141,52 +150,63 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
           </div>
 
           <div className="settings-group">
-            <label className="settings-label">Global hotkey</label>
+            <label className="settings-label">{t('settings.hotkey')}</label>
             <div className="hotkey-input-row">
               <input
                 className="hotkey-input"
                 readOnly
-                value={isListening ? 'Press shortcut...' : settings.hotkey}
+                value={isListening ? t('settings.hotkey_press') : settings.hotkey}
                 onClick={startHotkeyListen}
               />
               <button className="filter-chip" onClick={() => update('hotkey', 'Alt+Shift+V')}>
-                Reset
+                {t('settings.reset')}
               </button>
             </div>
           </div>
 
           <div className="settings-group">
-            <label className="settings-label">Theme</label>
+            <label className="settings-label">{t('settings.theme')}</label>
             <select
               value={settings.theme}
               onChange={(e) => update('theme', e.target.value)}
             >
-              <option value="dark">Dark</option>
-              <option value="light">Light</option>
+              <option value="dark">{t('settings.theme_dark')}</option>
+              <option value="light">{t('settings.theme_light')}</option>
             </select>
           </div>
 
           <div className="settings-group">
-            <label className="settings-label">Clear History</label>
+            <label className="settings-label">{t('settings.language')}</label>
+            <select
+              value={locale}
+              onChange={(e) => update('locale', e.target.value)}
+            >
+              <option value="en">{t('settings.lang_en')}</option>
+              <option value="zh">{t('settings.lang_zh')}</option>
+            </select>
+          </div>
+
+          <div className="settings-group">
+            <label className="settings-label">{t('settings.clear_history')}</label>
             {showClearConfirm ? (
               <div className="confirm-row">
-                <span>Clear all history? Favorites preserved.</span>
-                <button className="filter-chip danger" onClick={handleClearHistory}>Confirm</button>
-                <button className="filter-chip" onClick={() => setShowClearConfirm(false)}>Cancel</button>
+                <span>{t('settings.clear_confirm')}</span>
+                <button className="filter-chip danger" onClick={handleClearHistory}>{t('settings.clear_confirm_btn')}</button>
+                <button className="filter-chip" onClick={() => setShowClearConfirm(false)}>{t('settings.clear_cancel')}</button>
               </div>
             ) : (
               <button className="filter-chip danger" onClick={() => setShowClearConfirm(true)}>
-                Clear All History
+                {t('settings.clear_all')}
               </button>
             )}
           </div>
 
           <div className="settings-group stats-group">
-            <label className="settings-label">Stats</label>
+            <label className="settings-label">{t('settings.stats')}</label>
             <div className="stats-row">
-              <span>Total items: {stats.totalItems.toLocaleString()}</span>
-              <span>Favorites: {stats.favoriteItems.toLocaleString()}</span>
-              <span>DB size: {formatSize(stats.dbSize)}</span>
+              <span>{t('settings.stats_total', { n: stats.totalItems.toLocaleString() })}</span>
+              <span>{t('settings.stats_fav', { n: stats.favoriteItems.toLocaleString() })}</span>
+              <span>{t('settings.stats_db', { s: formatSize(stats.dbSize) })}</span>
             </div>
           </div>
         </>
@@ -195,16 +215,16 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
       {activeTab === 'exclusions' && (
         <>
           <div className="settings-group">
-            <label className="settings-label">Exclude by application</label>
+            <label className="settings-label">{t('settings.exclude_app')}</label>
             <div className="add-row">
               <input
                 type="text"
-                placeholder="e.g. 1Password, KeePass"
+                placeholder={t('settings.exclude_app_placeholder')}
                 value={newApp}
                 onChange={(e) => setNewApp(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && addExclusionApp()}
               />
-              <button className="filter-chip" onClick={addExclusionApp}>Add</button>
+              <button className="filter-chip" onClick={addExclusionApp}>{t('settings.add')}</button>
             </div>
             <div className="list-tags">
               {settings.exclusionApps.map((app) => (
@@ -214,22 +234,22 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
                 </span>
               ))}
               {settings.exclusionApps.length === 0 && (
-                <span className="empty-hint">No application exclusions</span>
+                <span className="empty-hint">{t('settings.no_exclude_app')}</span>
               )}
             </div>
           </div>
 
           <div className="settings-group">
-            <label className="settings-label">Exclude by content pattern (regex)</label>
+            <label className="settings-label">{t('settings.exclude_pattern')}</label>
             <div className="add-row">
               <input
                 type="text"
-                placeholder="e.g. ^password:"
+                placeholder={t('settings.exclude_pattern_placeholder')}
                 value={newPattern}
                 onChange={(e) => setNewPattern(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && addExclusionPattern()}
               />
-              <button className="filter-chip" onClick={addExclusionPattern}>Add</button>
+              <button className="filter-chip" onClick={addExclusionPattern}>{t('settings.add')}</button>
             </div>
             <div className="list-tags">
               {settings.exclusionPatterns.map((p) => (
@@ -239,7 +259,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
                 </span>
               ))}
               {settings.exclusionPatterns.length === 0 && (
-                <span className="empty-hint">No content pattern exclusions</span>
+                <span className="empty-hint">{t('settings.no_exclude_pattern')}</span>
               )}
             </div>
           </div>
@@ -249,21 +269,21 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
       {activeTab === 'sync' && (
         <>
           <div className="settings-group">
-            <label className="settings-label">LAN sync</label>
+            <label className="settings-label">{t('settings.lan_sync')}</label>
             <label className="toggle">
               <input
                 type="checkbox"
                 checked={settings.syncEnabled}
                 onChange={(e) => update('syncEnabled', e.target.checked)}
               />
-              <span>Enable network sync</span>
+              <span>{t('settings.sync_enable')}</span>
             </label>
           </div>
 
           <div className="settings-group">
-            <label className="settings-label">Discovered peers</label>
+            <label className="settings-label">{t('settings.peers')}</label>
             {peers.length === 0 ? (
-              <span className="empty-hint">No peers discovered on LAN</span>
+              <span className="empty-hint">{t('settings.no_peers')}</span>
             ) : (
               <div className="peer-list">
                 {peers.map((peer) => (

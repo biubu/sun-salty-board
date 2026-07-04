@@ -26,6 +26,9 @@ mac:
         - arm64
   artifactName: ${name}-${version}-${arch}.${ext}
   category: public.app-category.utilities
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  identity: null
 linux:
   target:
     - target: AppImage

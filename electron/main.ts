@@ -4,7 +4,7 @@ import {
 } from 'electron'
 import { execFile } from 'child_process'
 import path from 'path'
-import { createWorker, WorkerBridge } from './worker'
+import { createWorker, WorkerBridge, ClipboardItem } from './worker'
 import {
   startMonitoring, stopMonitoring, setPollingInterval,
   setExclusionApps, setExclusionPatterns, setCtrlState,
@@ -20,11 +20,14 @@ let workerBridge: WorkerBridge | null = null
 
 const isDev = !app.isPackaged
 let isQuitting = false
-
 const gotTheLock = app.requestSingleInstanceLock()
 if (!gotTheLock) {
   app.quit()
 }
+
+app.on('before-quit', () => {
+  isQuitting = true
+})
 
 app.on('second-instance', () => {
   if (mainWindow) {
@@ -73,12 +76,11 @@ function toggleWindow(): void {
   } else {
     const cursorPoint = screen.getCursorScreenPoint()
     const display = screen.getDisplayNearestPoint(cursorPoint)
-    const { x, y, width, height } = display.workArea
+    const { x: dx, y: dy, width: dw, height: dh } = display.workArea
     const [winWidth, winHeight] = mainWindow.getSize()
-    mainWindow.setPosition(
-      Math.round(x + (width - winWidth) / 2),
-      Math.round(y + (height - winHeight) / 2),
-    )
+    const winX = Math.max(dx, Math.min(cursorPoint.x - Math.round(winWidth / 2), dx + dw - winWidth))
+    const winY = Math.max(dy, Math.min(cursorPoint.y + 24, dy + dh - winHeight))
+    mainWindow.setPosition(winX, winY)
     mainWindow.show()
     mainWindow.focus()
     mainWindow.webContents.send('overlay-opened')
@@ -119,6 +121,7 @@ function registerHotkey(hotkey: string): void {
 }
 
 function sendHistoryUpdate(): void {
+  workerBridge?.flush()
   mainWindow?.webContents.send('history-update', workerBridge?.getItems() ?? [])
 }
 
@@ -215,32 +218,30 @@ app.on('ready', async () => {
     return workerBridge?.getItems() ?? []
   })
 
-  ipcMain.on('paste-item', (_e, id: number) => {
-    const item = workerBridge?.getItemById(id)
-    if (item) {
-      if (item.dataType === 'image' && item.imageData) {
-        clipboard.writeImage(nativeImage.createFromBuffer(Buffer.from(item.imageData)))
-      } else if (item.dataType === 'files' && item.filePaths) {
-        clipboard.writeText(item.content)
-      } else {
-        clipboard.writeText(item.content)
-      }
+  function doPaste(item: ClipboardItem): void {
+    if (item.dataType === 'image' && item.imageData) {
+      clipboard.writeImage(nativeImage.createFromBuffer(Buffer.from(item.imageData)))
+    } else {
+      clipboard.writeText(item.content)
     }
     mainWindow?.hide()
-    setTimeout(simulatePaste, 80)
+    if (process.platform === 'darwin') {
+      app.hide()
+      setTimeout(simulatePaste, 80)
+    } else {
+      setTimeout(simulatePaste, 150)
+    }
+  }
+
+  ipcMain.on('paste-item', (_e, id: number) => {
+    const item = workerBridge?.getItemById(id)
+    if (item) doPaste(item)
   })
 
   ipcMain.on('paste-by-index', (_e, index: number) => {
     const items = workerBridge?.getItems() ?? []
     if (index >= 0 && index < items.length) {
-      const item = items[index]
-      if (item.dataType === 'image' && item.imageData) {
-        clipboard.writeImage(nativeImage.createFromBuffer(Buffer.from(item.imageData)))
-      } else {
-        clipboard.writeText(item.content)
-      }
-      mainWindow?.hide()
-      setTimeout(simulatePaste, 80)
+      doPaste(items[index])
     }
   })
 

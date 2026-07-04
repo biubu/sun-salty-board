@@ -86,36 +86,7 @@ function poll(): void {
 
   if (isDuplicate()) return
 
-  if (currentText && currentText !== lastText) {
-    lastText = currentText
-    const html = currentHtml !== lastHtml ? currentHtml : undefined
-    if (html) lastHtml = currentHtml
-
-    if (!isExcluded('', currentText)) {
-      onEvent?.({
-        content: currentText,
-        contentHtml: html,
-        dataType: html ? 'richtext' : 'text',
-        sourceApp: '',
-        sensitive: ctrlDown,
-      })
-    }
-    return
-  }
-
-  const currentImagePng = currentImage.isEmpty() ? null : currentImage.toPNG()
-  if (currentImagePng && (!lastImageBuf || !currentImagePng.equals(lastImageBuf))) {
-    lastImageBuf = currentImagePng
-    onEvent?.({
-      content: '',
-      dataType: 'image',
-      imageData: new Uint8Array(currentImagePng),
-      sourceApp: '',
-      sensitive: ctrlDown,
-    })
-    return
-  }
-
+  // 1. files 最具体，优先判断
   if (currentFiles.length > 0) {
     const filesStr = JSON.stringify(currentFiles)
     const lastFilesStr = JSON.stringify(lastFiles)
@@ -131,6 +102,38 @@ function poll(): void {
           sensitive: ctrlDown,
         })
       }
+    }
+    return
+  }
+
+  // 2. image
+  const currentImagePng = currentImage.isEmpty() ? null : currentImage.toPNG()
+  if (currentImagePng && (!lastImageBuf || !currentImagePng.equals(lastImageBuf))) {
+    lastImageBuf = currentImagePng
+    onEvent?.({
+      content: '',
+      dataType: 'image',
+      imageData: new Uint8Array(currentImagePng),
+      sourceApp: '',
+      sensitive: ctrlDown,
+    })
+    return
+  }
+
+  // 3. text / richtext 最不具体，放最后
+  if (currentText && currentText !== lastText) {
+    lastText = currentText
+    const html = currentHtml !== lastHtml ? currentHtml : undefined
+    if (html) lastHtml = currentHtml
+
+    if (!isExcluded('', currentText)) {
+      onEvent?.({
+        content: currentText,
+        contentHtml: html,
+        dataType: html ? 'richtext' : 'text',
+        sourceApp: '',
+        sensitive: ctrlDown,
+      })
     }
   }
 }

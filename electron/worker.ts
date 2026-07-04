@@ -7,7 +7,7 @@ import { createFtsTable, indexItemFts, removeItemFts, searchFts } from './ftsSea
 import { prepareUndo, consumeUndo } from './undoManager'
 import { addSensitiveItem, getSensitiveItems, getSensitiveItemById, removeSensitiveItem, clearSensitiveItems } from './sensitiveItems'
 
-interface ClipboardItem {
+export interface ClipboardItem {
   id: number
   content: string
   contentHtml?: string
@@ -32,6 +32,7 @@ interface Settings {
   expirationDays: number
   syncEnabled: boolean
   theme: string
+  locale: string
   exclusionApps: string[]
   exclusionPatterns: string[]
 }
@@ -69,7 +70,7 @@ async function initDatabase(): Promise<void> {
       source_app TEXT,
       source_device TEXT,
       is_favorite INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
     );
 
     CREATE TABLE IF NOT EXISTS categories (
@@ -110,6 +111,10 @@ async function initDatabase(): Promise<void> {
   db.run(
     'INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)',
     ['theme', 'dark'],
+  )
+  db.run(
+    'INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)',
+    ['locale', 'en'],
   )
   db.run(
     'INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)',
@@ -437,6 +442,7 @@ function getSettings(): Settings {
     expirationDays: parseInt(map.expirationDays || '30', 10),
     syncEnabled: map.syncEnabled === 'true',
     theme: (map.theme || 'dark') as 'light' | 'dark',
+    locale: map.locale || 'en',
     exclusionApps: JSON.parse(map.exclusionApps || '[]'),
     exclusionPatterns: JSON.parse(map.exclusionPatterns || '[]'),
   }
@@ -465,6 +471,7 @@ function getStats(): { totalItems: number; favoriteItems: number; dbSize: number
 
 export interface WorkerBridge {
   storeItem: (item: Omit<ClipboardItem, 'id' | 'isFavorite' | 'categoryIds' | 'createdAt'>) => void
+  flush: () => void
   getItems: () => ClipboardItem[]
   getItemById: (id: number) => ClipboardItem | null
   deleteItem: (id: number) => void
@@ -491,6 +498,7 @@ export async function createWorker(): Promise<WorkerBridge> {
 
   return {
     storeItem: queueItem,
+    flush: flushWriteQueue,
     getItems,
     getItemById,
     deleteItem,

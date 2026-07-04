@@ -41,6 +41,7 @@ export interface Settings {
   expirationDays: number
   syncEnabled: boolean
   theme: 'light' | 'dark'
+  locale: string
   exclusionApps: string[]
   exclusionPatterns: string[]
 }

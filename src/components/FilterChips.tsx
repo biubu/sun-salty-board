@@ -1,13 +1,14 @@
 import { useState, useEffect } from 'react'
 import { FilterType } from '../App'
 import type { Category } from '../types'
+import { useI18n } from '../utils/i18n'
 
-const FILTERS: { key: FilterType; label: string }[] = [
-  { key: 'all', label: 'All' },
-  { key: 'text', label: 'Text' },
-  { key: 'image', label: 'Images' },
-  { key: 'files', label: 'Files' },
-  { key: 'favorites', label: 'Favorites' },
+const FILTERS: { key: FilterType; i18nKey: string }[] = [
+  { key: 'all', i18nKey: 'filter.all' },
+  { key: 'text', i18nKey: 'filter.text' },
+  { key: 'image', i18nKey: 'filter.images' },
+  { key: 'files', i18nKey: 'filter.files' },
+  { key: 'favorites', i18nKey: 'filter.favorites' },
 ]
 
 type FilterChipsProps = {
@@ -18,6 +19,7 @@ type FilterChipsProps = {
 }
 
 export default function FilterChips({ activeFilter, onFilterChange, selectedCategoryId, onCategoryChange }: FilterChipsProps) {
+  const { t } = useI18n()
   const [categories, setCategories] = useState<Category[]>([])
 
   useEffect(() => {
@@ -32,7 +34,7 @@ export default function FilterChips({ activeFilter, onFilterChange, selectedCate
           className={`filter-chip ${activeFilter === f.key ? 'active' : ''}`}
           onClick={() => onFilterChange(f.key)}
         >
-          {f.label}
+          {t(f.i18nKey)}
         </button>
       ))}
       {categories.map((cat) => (

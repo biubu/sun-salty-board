@@ -3,6 +3,7 @@ import { FixedSizeList as List } from 'react-window'
 import AutoSizer from 'react-virtualized-auto-sizer'
 import { ClipboardItem } from '../App'
 import HistoryItem from './HistoryItem'
+import { useI18n } from '../utils/i18n'
 
 type HistoryPanelProps = {
   items: ClipboardItem[]
@@ -12,9 +13,10 @@ type HistoryPanelProps = {
   onToggleFavorite: (id: number) => void
 }
 
-const ITEM_HEIGHT = 80
+const ITEM_HEIGHT = 94
 
 export default function HistoryPanel({ items, selectedIndex, onSelect, onDelete, onToggleFavorite }: HistoryPanelProps) {
+  const { t } = useI18n()
   const Row = useCallback(
     ({ index, style }: { index: number; style: React.CSSProperties }) => {
       const item = items[index]
@@ -30,14 +32,14 @@ export default function HistoryPanel({ items, selectedIndex, onSelect, onDelete,
         </div>
       )
     },
-    [items, onSelect, onDelete, onToggleFavorite],
+    [items, selectedIndex, onSelect, onDelete, onToggleFavorite],
   )
 
   if (items.length === 0) {
     return (
       <div className="empty-state">
-        <span>No clipboard history</span>
-        <span>Copy something to get started</span>
+        <span>{t('empty.no_history')}</span>
+        <span>{t('empty.hint')}</span>
       </div>
     )
   }

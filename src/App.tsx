@@ -1,8 +1,10 @@
-import { useState, useEffect, useMemo, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef, useContext } from 'react'
 import HistoryPanel from './components/HistoryPanel'
 import SearchBar from './components/SearchBar'
 import FilterChips from './components/FilterChips'
 import SettingsPanel from './components/SettingsPanel'
+import { I18nContext, type Locale } from './utils/i18n'
+import type { Settings } from './types'
 
 export interface ClipboardItem {
   id: number
@@ -27,6 +29,7 @@ export default function App() {
   const [selectedCategoryId, setSelectedCategoryId] = useState<number | null>(null)
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [showSettings, setShowSettings] = useState(false)
+  const { setLocale } = useContext(I18nContext)
   const selectedIndexRef = useRef(selectedIndex)
   selectedIndexRef.current = selectedIndex
 
@@ -37,6 +40,13 @@ export default function App() {
     return () => { unsub1(); unsub2() }
   }, [])
 
+  useEffect(() => {
+    window.electronAPI.getSettings().then((s: Settings) => {
+      document.documentElement.setAttribute('data-theme', s.theme)
+      setLocale(s.locale as Locale || 'en')
+    })
+  }, [setLocale])
+
   const filteredItems = useMemo(() => {
     let result = items
     if (searchQuery) {
@@ -45,6 +55,8 @@ export default function App() {
     }
     if (activeFilter === 'favorites') {
       result = result.filter((item) => item.isFavorite)
+    } else if (activeFilter === 'text') {
+      result = result.filter((item) => item.dataType === 'text' || item.dataType === 'richtext')
     } else if (activeFilter !== 'all') {
       result = result.filter((item) => item.dataType === activeFilter)
     }
