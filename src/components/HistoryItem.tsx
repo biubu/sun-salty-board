@@ -17,9 +17,10 @@ export default function HistoryItem({ item, isActive, onSelect, onDelete, onTogg
   const [showUndo, setShowUndo] = useState(false)
   const [deletedId, setDeletedId] = useState<number | null>(null)
 
-  // Build the blob URL once per buffer reference; cleanup revokes when this
-  // row is unmounted. This keeps memory bounded across long copy/paste
-  // sessions where each row would otherwise spawn a fresh data: URL.
+  // Build the blob URL once per (buffer, mime, dataType) tuple. The cleanup
+  // revokes the URL when this row unmounts or the inputs change, which is
+  // the only state we need — imageUrl.ts keeps no shared registry, so the
+  // hookup is strictly local.
   const imageSrc = useMemo(() => {
     const buf = item.imageData
     if (!buf || item.dataType !== 'image') return null
@@ -29,11 +30,8 @@ export default function HistoryItem({ item, isActive, onSelect, onDelete, onTogg
 
   useEffect(() => {
     if (!imageSrc) return
-    const buf = item.imageData
-    if (!buf) return
-    const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf)
-    return () => imageUnref(bytes)
-  }, [imageSrc, item.imageData])
+    return () => imageUnref(imageSrc)
+  }, [imageSrc])
 
   useEffect(() => {
     if (!showUndo || deletedId === null) return

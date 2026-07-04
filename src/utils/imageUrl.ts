@@ -1,55 +1,46 @@
-// Cache of blob: URLs for clipboard image previews.
+// Blob URL registry for clipboard image previews.
 //
-// Why we keep this in a module-level Map instead of `URL.createObjectURL`
-// per <img> render:
-//   * imageData bytes come over IPC already as a Uint8Array; we wrap once
-//     in a Blob and create the URL once.
-//   * When the underlying item is deleted / replaced, the renderer would
-//     normally keep the URL alive until GC; we explicitly revoke on
-//     imageUnref so memory doesn't grow unbounded with copy/paste usage.
-//   * WeakMap isn't enough because Blob → URL is one-way — we need a
-//     deterministic lookup by Uint8Array reference.
-const urlCache = new WeakMap<Uint8Array, string>()
-const refCounts = new WeakMap<Uint8Array, number>()
+// The previous implementation kept WeakMap-keyed refcounts to share a
+// single URL.createObjectURL per Uint8Array across remounts. Two problems:
+//
+//   * The BLOB itself is held strongly in the parent component's state
+//     (every item in \`App.items\`), so the WeakMap key never became
+//     unreachable and the cached URL was never revoked. The "shared"
+//     registry effectively leaked one blob per ever-shown image.
+//   * useEffect cleanup driving imageUnref was tied to react-window's
+//     virtualised row recycling: when a row was reused for a different
+//     item, the refcount math drifted and URLs accumulated.
+//
+// The renderer has 100 rows tops and Chromium Blob ctor is
+// effectively free for a Uint8Array view, so we drop the cache
+// entirely: every mount creates a fresh blob URL, every unmount
+// revokes it. No globals, no refcount, no leaks.
 
 /**
- * Get a blob URL for an image buffer, bumping its refcount. The caller must
- * call imageUnref when the URL is no longer needed (component unmount,
- * cache eviction, etc).
+ * Build a blob: URL for the given image bytes. The URL is owned by the
+ * caller and MUST be revoked via imageUnref() when no longer needed
+ * (e.g. when the corresponding component unmounts).
  */
 export function imageRef(buf: Uint8Array, mime?: string): string {
-  const existing = urlCache.get(buf)
-  if (existing) {
-    refCounts.set(buf, (refCounts.get(buf) ?? 0) + 1)
-    return existing
+  // Bytes can come over IPC as either an ArrayBuffer-backed view or
+  // (rarely) a SharedArrayBuffer-backed view. The Blob constructor wants
+  // the former; copy in the narrow case so we don't crash a future
+  // render path that hands us one.
+  let blobPart: BlobPart
+  if (buf.buffer instanceof ArrayBuffer) {
+    blobPart = buf as Uint8Array<ArrayBuffer>
+  } else {
+    const copy = new Uint8Array(buf.byteLength)
+    copy.set(buf)
+    blobPart = copy
   }
-  // mime default is image/png because clipboard images on most platforms
-  // are PNGs; storage layer also stamps the actual detected mime.
-  // Wrap the bytes in a fresh Uint8Array<ArrayBuffer> so the BlobPart type
-  // narrows regardless of whether `buf.buffer` is an ArrayBuffer or
-  // SharedArrayBuffer (TS 5.7 lib.dom tightened this).
-  const view = new Uint8Array(buf.byteLength)
-  view.set(buf)
-  const url = URL.createObjectURL(new Blob([view], { type: mime || 'image/png' }))
-  urlCache.set(buf, url)
-  refCounts.set(buf, 1)
-  return url
+  return URL.createObjectURL(new Blob([blobPart], { type: mime || 'image/png' }))
 }
 
 /**
- * Decrement the refcount and revoke the blob URL when it hits zero.
- * Safe to call multiple times; subsequent calls are no-ops.
+ * Release a blob URL previously returned by imageRef(). Idempotent —
+ * calling it twice is safe (Chromium silently no-ops a second revoke).
  */
-export function imageUnref(buf: Uint8Array): void {
-  const n = (refCounts.get(buf) ?? 0) - 1
-  if (n > 0) {
-    refCounts.set(buf, n)
-    return
-  }
-  refCounts.delete(buf)
-  const url = urlCache.get(buf)
-  if (url) {
-    urlCache.delete(buf)
-    URL.revokeObjectURL(url)
-  }
+export function imageUnref(url: string): void {
+  URL.revokeObjectURL(url)
 }
