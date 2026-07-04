@@ -24,6 +24,7 @@ import { prepareUndo, consumeUndo, clipboardItemToUndoEntry } from './undoManage
 import {
   addSensitiveItem, getSensitiveItems, getSensitiveItemById,
   removeSensitiveItem, clearSensitiveItems,
+  startEvictionTimer, stopEvictionTimer,
 } from './sensitiveItems'
 import { detectImageMimeType } from '../src/utils/magicBytes'
 
@@ -564,6 +565,7 @@ export interface WorkerBridge {
 
 export async function createWorker(): Promise<WorkerBridge> {
   await initDatabase()
+  startEvictionTimer()
 
   // Always drain whatever's pending in the write queue when the process is
   // about to exit — without this, a user who copies something then quickly
@@ -632,6 +634,7 @@ export async function createWorker(): Promise<WorkerBridge> {
         }
         if (writeQueue.length > 0) flushWriteQueue()
       } finally {
+        stopEvictionTimer()
         db.close()
       }
     },
