@@ -1,17 +1,15 @@
 import {
   app, BrowserWindow, ipcMain, Tray, Menu,
-  globalShortcut, nativeImage, clipboard, screen,
+  globalShortcut, nativeImage, clipboard, screen, dialog,
 } from 'electron'
 import { execFile } from 'child_process'
 import path from 'path'
 import { createWorker, WorkerBridge, ClipboardItem } from './worker'
+import type { ClipboardEvent } from './platform-monitor'
 import {
   startMonitoring, stopMonitoring, setPollingInterval,
   setExclusionApps, setExclusionPatterns, setCtrlState,
 } from './platform-monitor'
-import {
-  startSync, stopSync, broadcastClipboard, getPeers, setDeviceName,
-} from './sync'
 import { setupAutoUpdater } from './autoUpdater'
 import { autoUpdater } from 'electron-updater'
 
@@ -127,7 +125,22 @@ function createTray(): void {
       },
     },
     { type: 'separator' },
-    { label: 'About', click: () => {} },
+    {
+      label: 'About',
+      click: () => {
+        // Use the packaged app version when installed, fall back to package.json
+        // in dev where app.getVersion() still works but the version field is the
+        // last published release rather than the current source.
+        const version = app.getVersion()
+        dialog.showMessageBox({
+          type: 'info',
+          title: 'About SunSaltyBoard',
+          message: 'SunSaltyBoard',
+          detail: `Version ${version}\n\nA cross-platform clipboard manager with high-capacity history and full-text search.`,
+          buttons: ['OK'],
+        })
+      },
+    },
     { type: 'separator' },
     {
       label: 'Quit',
@@ -169,15 +182,7 @@ function simulatePaste(): void {
   }
 }
 
-function onClipboardEvent(event: {
-  content: string
-  contentHtml?: string
-  dataType: string
-  imageData?: Uint8Array
-  filePaths?: string[]
-  sourceApp: string
-  sensitive?: boolean
-}): void {
+function onClipboardEvent(event: ClipboardEvent): void {
   if (event.sensitive) {
     workerBridge?.addSensitiveItem(event.content, event.dataType)
     return
@@ -186,45 +191,10 @@ function onClipboardEvent(event: {
   workerBridge?.storeItem({
     content: event.content,
     contentHtml: event.contentHtml,
-    dataType: event.dataType as any,
+    dataType: event.dataType,
     imageData: event.imageData,
     filePaths: event.filePaths,
     sourceApp: event.sourceApp,
-  })
-  sendHistoryUpdate()
-
-  const settings = workerBridge?.getSettings()
-  if (settings?.syncEnabled) {
-    broadcastClipboard({
-      type: 'clipboard',
-      content: event.content,
-      contentHtml: event.contentHtml,
-      dataType: event.dataType,
-      imageData: event.imageData ? Array.from(event.imageData) : undefined,
-      filePaths: event.filePaths,
-      sourceDevice: settings?.hotkey || 'unknown',
-      timestamp: new Date().toISOString(),
-    })
-  }
-}
-
-function onSyncReceive(msg: {
-  content: string
-  contentHtml?: string
-  dataType: string
-  imageData?: number[]
-  filePaths?: string[]
-  sourceDevice: string
-  timestamp: string
-}): void {
-  workerBridge?.storeItem({
-    content: msg.content,
-    contentHtml: msg.contentHtml,
-    dataType: msg.dataType as any,
-    imageData: msg.imageData ? new Uint8Array(msg.imageData) : undefined,
-    filePaths: msg.filePaths,
-    sourceApp: '',
-    sourceDevice: msg.sourceDevice,
   })
   sendHistoryUpdate()
 }
@@ -237,10 +207,6 @@ app.on('ready', async () => {
 
   if (settings.exclusionApps?.length) setExclusionApps(settings.exclusionApps)
   if (settings.exclusionPatterns?.length) setExclusionPatterns(settings.exclusionPatterns)
-
-  ipcMain.on('get-history', () => {
-    sendHistoryUpdate()
-  })
 
   ipcMain.handle('get-history-items', () => {
     return workerBridge?.getItems() ?? []
@@ -268,8 +234,12 @@ app.on('ready', async () => {
 
   ipcMain.on('paste-by-index', (_e, index: number) => {
     const items = workerBridge?.getItems() ?? []
-    if (index >= 0 && index < items.length) {
-      doPaste(items[index])
+    // Treat the digit shortcut as 1-based so "press 1 → paste first item"
+    // matches the on-screen numbering. index === 0 is accepted as a synonym
+    // for "10th item" so all ten slots (0–9) remain addressable.
+    const target = index === 0 ? 9 : index - 1
+    if (target >= 0 && target < items.length) {
+      doPaste(items[target])
     }
   })
 
@@ -340,14 +310,6 @@ app.on('ready', async () => {
     if (s.exclusionPatterns) {
       setExclusionPatterns(s.exclusionPatterns as string[])
     }
-    if (s.syncEnabled !== undefined) {
-      if (s.syncEnabled) {
-        setDeviceName(app.getName())
-        startSync(onSyncReceive)
-      } else {
-        stopSync()
-      }
-    }
   })
 
   // Reserved hook for future overlay-only keyboard handling. The renderer
@@ -386,10 +348,6 @@ app.on('ready', async () => {
     })
   })
 
-  ipcMain.handle('get-sync-peers', () => {
-    return getPeers()
-  })
-
   createWindow()
   if (!isDev) {
     setupAutoUpdater(mainWindow)
@@ -397,11 +355,6 @@ app.on('ready', async () => {
   createTray()
 
   startMonitoring(onClipboardEvent, 500)
-
-  if (settings.syncEnabled) {
-    setDeviceName(app.getName())
-    startSync(onSyncReceive)
-  }
 })
 
 app.on('window-all-closed', () => {
@@ -421,6 +374,5 @@ app.on('activate', () => {
 app.on('will-quit', () => {
   globalShortcut.unregisterAll()
   stopMonitoring()
-  stopSync()
   workerBridge?.close()
 })

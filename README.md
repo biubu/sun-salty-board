@@ -1,6 +1,6 @@
 # SunSaltyBoard
 
-A cross-platform clipboard manager for Windows and Linux with high-capacity history (up to 10,000+ items), full-text search, categories, favorites, and optional LAN sync.
+A cross-platform clipboard manager for Windows and Linux with high-capacity history (up to 10,000+ items), full-text search, categories, and favorites.
 
 ## Features
 
@@ -11,7 +11,6 @@ A cross-platform clipboard manager for Windows and Linux with high-capacity hist
 - System tray integration with global hotkey (Alt+Shift+V)
 - Categories and favorites for organizing items
 - Privacy controls: delete items, clear history, exclusion rules
-- Optional LAN sync via mDNS + WebSocket with TLS
 - Dark theme UI with virtualized scrolling
 
 ## Development

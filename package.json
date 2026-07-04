@@ -19,17 +19,16 @@
     "generate-icons": "node scripts/generate-icons.js"
   },
   "dependencies": {
+    "better-sqlite3": "^11.7.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-virtualized-auto-sizer": "^1.0.24",
-    "react-window": "^1.8.10",
-    "sql.js": "^1.11.0"
+    "react-window": "^1.8.10"
   },
   "devDependencies": {
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@types/react-window": "^1.8.8",
-    "@types/sql.js": "^1.4.9",
     "@vitejs/plugin-react": "^4.3.4",
     "electron": "^33.4.11",
     "electron-builder": "^25.1.8",
@@ -44,11 +43,10 @@
   },
   "optionalDependencies": {
     "electron-global-shortcut": "^1.0.2",
-    "electron-updater": "^6.3.9",
-    "multicast-dns": "^7.2.5",
-    "ws": "^8.18.0"
+    "electron-updater": "^6.3.9"
   },
   "allowScripts": {
-    "electron@33.4.11": true
+    "electron@33.4.11": true,
+    "better-sqlite3@11.7.0": true
   }
 }

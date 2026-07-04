@@ -39,7 +39,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   getStats: () => ipcRenderer.invoke('get-stats'),
   getSensitiveItems: () => ipcRenderer.invoke('get-sensitive-items'),
-  getSyncPeers: () => ipcRenderer.invoke('get-sync-peers'),
 
   onUpdateAvailable: (callback: (info: unknown) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, info: unknown) => callback(info)

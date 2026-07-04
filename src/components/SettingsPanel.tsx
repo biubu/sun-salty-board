@@ -1,5 +1,5 @@
-import { useState, useEffect, useContext } from 'react'
-import type { Settings, SyncPeer } from '../types/clipboard'
+import { useState, useEffect, useContext, useRef, useCallback } from 'react'
+import type { Settings } from '../types/clipboard'
 import { I18nContext, type Locale } from '../utils/i18n'
 
 type SettingsPanelProps = {
@@ -12,7 +12,6 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
     maxItems: 10000,
     hotkey: 'Alt+Shift+V',
     expirationDays: 30,
-    syncEnabled: false,
     theme: 'dark',
     locale: 'en',
     exclusionApps: [],
@@ -20,22 +19,44 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
   })
   const [isListening, setIsListening] = useState(false)
   const [stats, setStats] = useState({ totalItems: 0, favoriteItems: 0, dbSize: 0 })
-  const [peers, setPeers] = useState<SyncPeer[]>([])
   const [newApp, setNewApp] = useState('')
   const [newPattern, setNewPattern] = useState('')
   const [showClearConfirm, setShowClearConfirm] = useState(false)
-  const [activeTab, setActiveTab] = useState<'general' | 'exclusions' | 'sync' | 'updates'>('general')
+  const [activeTab, setActiveTab] = useState<'general' | 'exclusions' | 'updates'>('general')
   const [updateAvailable, setUpdateAvailable] = useState<{ version?: string } | null>(null)
   const [updateDownloaded, setUpdateDownloaded] = useState<{ version?: string } | null>(null)
   const [updateProgress, setUpdateProgress] = useState<{ percent: number } | null>(null)
   const [updateNone, setUpdateNone] = useState(false)
   const [updateError, setUpdateError] = useState<string | null>(null)
   const [updateChecking, setUpdateChecking] = useState(false)
+  // Coalesce high-frequency slider/drag updates (maxItems, expirationDays)
+  // into a single IPC + DB write per quiet window. Without this, dragging
+  // a slider fires dozens of updateSettings IPCs and per-key INSERT OR
+  // UPDATE statements inside the worker.
+  const settingsWriteTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pendingSettings = useRef<Partial<Settings>>({})
+  const flushPendingSettings = useCallback(() => {
+    if (Object.keys(pendingSettings.current).length === 0) return
+    window.electronAPI.updateSettings(pendingSettings.current as Partial<Settings>)
+    pendingSettings.current = {}
+    settingsWriteTimer.current = null
+  }, [])
+  const queueSettingsWrite = useCallback((patch: Partial<Settings>) => {
+    pendingSettings.current = { ...pendingSettings.current, ...patch }
+    if (settingsWriteTimer.current) clearTimeout(settingsWriteTimer.current)
+    settingsWriteTimer.current = setTimeout(flushPendingSettings, 200)
+  }, [flushPendingSettings])
+  // Mirror `updateChecking` into a ref so the not-available handler can read
+  // the latest value without forcing the whole effect (5 IPC subscriptions)
+  // to tear down and rebuild every time the flag flips. Subscribing once on
+  // mount and dispatching updates by reading the ref avoids losing events
+  // that arrive during a re-subscribe window.
+  const updateCheckingRef = useRef(updateChecking)
+  updateCheckingRef.current = updateChecking
 
   useEffect(() => {
     window.electronAPI.getSettings().then(setSettings)
     window.electronAPI.getStats().then(setStats)
-    window.electronAPI.getSyncPeers().then(setPeers)
     const unsubAvail = window.electronAPI.onUpdateAvailable((info) => {
       const maybe = info as { version?: string }
       setUpdateChecking(false)
@@ -48,7 +69,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
       // Only surface "you're up to date" if the user explicitly asked;
       // auto-checks at startup stay silent to avoid banner noise.
       setUpdateChecking(false)
-      if (updateChecking) setUpdateNone(true)
+      if (updateCheckingRef.current) setUpdateNone(true)
       setUpdateAvailable(null)
     })
     const unsubProgress = window.electronAPI.onUpdateDownloadProgress((p) => {
@@ -66,7 +87,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
       setUpdateProgress(null)
     })
     return () => { unsubAvail(); unsubNone(); unsubProgress(); unsubDl(); unsubErr() }
-  }, [updateChecking])
+  }, [])
 
   const handleCheckForUpdate = () => {
     setUpdateChecking(true)
@@ -86,11 +107,16 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
   const update = <K extends keyof Settings>(key: K, value: Settings[K]) => {
     const updated = { ...settings, [key]: value }
     setSettings(updated)
-    // Pass the raw value through; the worker is responsible for serialising
-    // object values to its settings-store format. Centralising this avoids
-    // subtle drift between renderer and main about what "an object setting"
-    // looks like.
-    window.electronAPI.updateSettings({ [key]: value } as Partial<Settings>)
+    // Numeric fields (sliders, number inputs) are coalesced via
+    // queueSettingsWrite to avoid one IPC + 8-key DB write per drag tick.
+    // Discreet fields (theme, locale, hotkey, exclusion lists) flush
+    // immediately so the user sees the effect right away.
+    const isContinuous = key === 'maxItems' || key === 'expirationDays'
+    if (isContinuous) {
+      queueSettingsWrite({ [key]: value } as Partial<Settings>)
+    } else {
+      window.electronAPI.updateSettings({ [key]: value } as Partial<Settings>)
+    }
     if (key === 'theme') {
       document.documentElement.setAttribute('data-theme', value as string)
     }
@@ -98,6 +124,17 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
       setLocale(value as Locale)
     }
   }
+
+  // Drain any pending debounced settings writes on unmount so a quick
+  // "change a slider, then close the panel" sequence still persists.
+  useEffect(() => {
+    return () => {
+      if (settingsWriteTimer.current) {
+        clearTimeout(settingsWriteTimer.current)
+        flushPendingSettings()
+      }
+    }
+  }, [flushPendingSettings])
 
   const startHotkeyListen = () => {
     setIsListening(true)
@@ -190,10 +227,6 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
           className={`tab ${activeTab === 'exclusions' ? 'active' : ''}`}
           onClick={() => setActiveTab('exclusions')}
         >{t('settings.exclusions')}</button>
-        <button
-          className={`tab ${activeTab === 'sync' ? 'active' : ''}`}
-          onClick={() => setActiveTab('sync')}
-        >{t('settings.sync')}</button>
         <button
           className={`tab ${activeTab === 'updates' ? 'active' : ''}`}
           onClick={() => setActiveTab('updates')}
@@ -339,38 +372,6 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
                 <span className="empty-hint">{t('settings.no_exclude_pattern')}</span>
               )}
             </div>
-          </div>
-        </>
-      )}
-
-      {activeTab === 'sync' && (
-        <>
-          <div className="settings-group">
-            <label className="settings-label">{t('settings.lan_sync')}</label>
-            <label className="toggle">
-              <input
-                type="checkbox"
-                checked={settings.syncEnabled}
-                onChange={(e) => update('syncEnabled', e.target.checked)}
-              />
-              <span>{t('settings.sync_enable')}</span>
-            </label>
-          </div>
-
-          <div className="settings-group">
-            <label className="settings-label">{t('settings.peers')}</label>
-            {peers.length === 0 ? (
-              <span className="empty-hint">{t('settings.no_peers')}</span>
-            ) : (
-              <div className="peer-list">
-                {peers.map((peer) => (
-                  <div key={peer.id} className="peer-item">
-                    <span>{peer.deviceName || peer.hostname}</span>
-                    <span className="peer-address">{peer.address}:{peer.port}</span>
-                  </div>
-                ))}
-              </div>
-            )}
           </div>
         </>
       )}

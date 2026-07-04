@@ -35,7 +35,6 @@ interface Settings {
   maxItems: number
   hotkey: string
   expirationDays: number
-  syncEnabled: boolean
   theme: string
   locale: string
   exclusionApps: string[]
@@ -64,7 +63,13 @@ let flushTimer: ReturnType<typeof setTimeout> | null = null
 const FLUSH_DEBOUNCE_MS = 250
 
 function scheduleFlush(): void {
-  if (!dirty) return
+  // Mark dirty on every call: previously nothing in this file set dirty = true,
+  // so scheduleFlush early-returned via `if (!dirty) return` and edits (clear,
+  // delete, favorite toggle, settings updates …) lived only in memory. They
+  // appeared "restored" on next launch because the disk still held the prior
+  // state. Marking here keeps every mutator covered without sprinkling the
+  // assignment across the file.
+  dirty = true
   if (flushTimer) return // already scheduled
   flushTimer = setTimeout(() => {
     flushTimer = null
@@ -144,7 +149,6 @@ async function initDatabase(): Promise<void> {
   db.run('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', ['maxItems', '10000'])
   db.run('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', ['hotkey', 'Alt+Shift+V'])
   db.run('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', ['expirationDays', '30'])
-  db.run('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', ['syncEnabled', 'false'])
   db.run('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', ['theme', 'dark'])
   db.run('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', ['locale', 'en'])
   db.run('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', ['exclusionApps', '[]'])
@@ -364,6 +368,17 @@ function undoDelete(): ClipboardItem | null {
       entry.created_at,
     ],
   )
+  // Restore category associations captured at delete-time. Without this, an
+  // undone item would reappear without any of its previously-attached
+  // categories — the user would silently lose their organisational state.
+  if (entry.category_ids && entry.category_ids.length > 0) {
+    for (const catId of entry.category_ids) {
+      db.run(
+        'INSERT OR IGNORE INTO item_categories (item_id, category_id) VALUES (?, ?)',
+        [entry.id, catId],
+      )
+    }
+  }
   scheduleFlush()
   if (entry.data_type === 'text' || entry.data_type === 'richtext') {
     indexItemFts(db, entry.id)
@@ -387,7 +402,11 @@ function clearHistory(): void {
     }
   }
   db.run('DELETE FROM items WHERE is_favorite = 0')
-  scheduleFlush()
+  // Force-save so a user-initiated "clear all" survives even if the app is
+  // killed before the 250ms debounce window elapses. Without this, the
+  // classic fast-quit-after-clear scenario resurrects the deleted rows on
+  // next launch (the disk still holds the pre-clear state).
+  saveDbSync()
 }
 
 function searchHistory(query: string): ClipboardItem[] {
@@ -438,8 +457,17 @@ function renameCategory(id: number, name: string): void {
 }
 
 function deleteCategory(id: number): void {
-  db.run('DELETE FROM item_categories WHERE category_id = ?', [id])
-  db.run('DELETE FROM categories WHERE id = ?', [id])
+  // Wrap in a transaction so a crash between the two DELETEs can't leave
+  // orphan rows in item_categories that point to a vanished category.
+  db.run('BEGIN')
+  try {
+    db.run('DELETE FROM item_categories WHERE category_id = ?', [id])
+    db.run('DELETE FROM categories WHERE id = ?', [id])
+    db.run('COMMIT')
+  } catch (err) {
+    db.run('ROLLBACK')
+    throw err
+  }
   scheduleFlush()
 }
 
@@ -471,7 +499,6 @@ function getSettings(): Settings {
     maxItems: parseInt(map.maxItems || '10000', 10),
     hotkey: map.hotkey || 'Alt+Shift+V',
     expirationDays: parseInt(map.expirationDays || '30', 10),
-    syncEnabled: map.syncEnabled === 'true',
     theme: (map.theme || 'dark') as 'light' | 'dark',
     locale: map.locale || 'en',
     exclusionApps: JSON.parse(map.exclusionApps || '[]'),
@@ -553,6 +580,24 @@ export async function createWorker(): Promise<WorkerBridge> {
   }
   process.once('beforeExit', exitHandler)
   process.once('exit', exitHandler)
+
+  // Schedule periodic expiration cleanup. The original code only ran the
+  // sweep once on init, so a long-lived session (e.g. a user running the
+  // app for weeks without restart) would accumulate items past
+  // `expirationDays` indefinitely. Hourly cadence is far cheaper than the
+  // per-write flush and well below the typical 1-day TTL window.
+  const expirationTimer = setInterval(() => {
+    try {
+      cleanupExpiredItems()
+    } catch (err) {
+      console.warn('[SunSaltyBoard] Periodic expiration cleanup failed:', (err as Error).message)
+    }
+  }, 60 * 60 * 1000)
+  // Don't keep the Node event loop alive solely for this sweep — when
+  // everything else (windows, tray) has gone away, let the process exit.
+  if (typeof (expirationTimer as { unref?: () => void }).unref === 'function') {
+    (expirationTimer as { unref: () => void }).unref()
+  }
 
   return {
     storeItem: queueItem,

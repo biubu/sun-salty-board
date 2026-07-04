@@ -3,7 +3,6 @@ import type {
   Category,
   Settings,
   SensitiveItem,
-  SyncPeer,
 } from './types/clipboard'
 
 export {}
@@ -31,7 +30,6 @@ declare global {
       updateSettings: (settings: Partial<Settings>) => void
       getStats: () => Promise<{ totalItems: number; favoriteItems: number; dbSize: number }>
       getSensitiveItems: () => Promise<SensitiveItem[]>
-      getSyncPeers: () => Promise<SyncPeer[]>
       onUpdateAvailable: (callback: (info: unknown) => void) => () => void
       onUpdateNotAvailable: (callback: (info: unknown) => void) => () => void
       onUpdateDownloadProgress: (callback: (progress: unknown) => void) => () => void

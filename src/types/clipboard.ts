@@ -24,7 +24,6 @@ export interface Settings {
   maxItems: number
   hotkey: string
   expirationDays: number
-  syncEnabled: boolean
   theme: 'light' | 'dark'
   locale: string
   exclusionApps: string[]
@@ -36,12 +35,4 @@ export interface SensitiveItem {
   content: string
   dataType: string
   capturedAt: number
-}
-
-export interface SyncPeer {
-  id: string
-  hostname: string
-  deviceName: string
-  address: string
-  port: number
 }
