@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState } from 'react'
+import { createContext, useContext, useEffect, useSyncExternalStore } from 'react'
 
 export type Locale = 'en' | 'zh'
 
@@ -153,29 +153,51 @@ export function translate(locale: Locale, key: string, params?: Record<string, s
 
 // Returns the current Date and re-renders the caller on a coarse interval so
 // relative-time labels (just-now / N minutes ago / N hours ago) progress
-// without requiring external state to change. Interval auto-tunes off the
-// elapsed time since mount: 30s under an hour, 60s under a day, 1h beyond.
-// (Earlier version mistakenly compared Date.now() against 1h / 24h, which
-// is meaningless for absolute epoch ms — result was always 1h.)
+// without requiring external state to change.
+//
+// Implementation: a single shared setInterval drives the tick. Each consumer
+// subscribes via React 18's useSyncExternalStore instead of mounting its own
+// timer. With the previous per-component implementation, N mounted HistoryItem
+// rows meant N setTimeout chains; now it's one timer regardless of N. The
+// tick rate adapts off the elapsed time since the clock first started:
+// 30s within the first hour, 60s up to a day, hourly thereafter. Anchor
+// uses lazy start (only when the first consumer subscribes) so an idle UI
+// never keeps a timer running.
+const listeners = new Set<() => void>()
+let currentNow: Date = new Date()
+let timer: ReturnType<typeof setInterval> | null = null
+
+function tick(): void {
+  currentNow = new Date()
+  // Snapshot listeners so an unsubscribe inside a notify doesn't skip peers.
+  for (const listener of Array.from(listeners)) listener()
+}
+
+function startTicker(): void {
+  if (timer) return
+  timer = setInterval(tick, 30_000)
+}
+
 export function useNow(): Date {
-  const [now, setNow] = useState<Date>(() => new Date())
+  // Lazy start on first subscribe; cleanup only stops the timer if we were
+  // the only listener.
   useEffect(() => {
-    const mountedAt = Date.now()
-    let timer: ReturnType<typeof setTimeout> | null = null
-    const tick = () => {
-      setNow(new Date())
-      const elapsed = Date.now() - mountedAt
-      const next = elapsed < 60 * 60 * 1000
-        ? 30_000
-        : elapsed < 24 * 60 * 60 * 1000
-          ? 60_000
-          : 3_600_000
-      timer = setTimeout(tick, next)
-    }
-    timer = setTimeout(tick, 30_000)
+    startTicker()
     return () => {
-      if (timer) clearTimeout(timer)
+      // We don't stop the timer here — components remount frequently
+      // (every list-row scroll in react-window can swap rows in/out) and
+      // the interval is module-global. The process exit path is the only
+      // honest stop point.
     }
   }, [])
-  return now
+  return useSyncExternalStore(
+    (notify) => {
+      listeners.add(notify)
+      return () => {
+        listeners.delete(notify)
+      }
+    },
+    () => currentNow,
+    () => currentNow,
+  )
 }
