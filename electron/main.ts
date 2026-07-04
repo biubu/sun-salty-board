@@ -104,9 +104,19 @@ function createTray(): void {
   // macOS expects an alpha-only template image for the menu bar; the colored
   // app icon would render as a solid blob once setTemplateImage(true) drops
   // its RGB channels and keeps only the (fully opaque) alpha mask.
+  //
+  // Tray resources ship inside app.asar (electron-builder.yml \`files\` glob
+  // includes resources/**\*), so __dirname reaches them in both dev and
+  // production. process.resourcesPath is the more conventional prod path
+  // for non-asar'd files; the dev branch keeps the historical __dirname
+  // resolve so the same tree shape works without an electron-builder run.
   const iconPath = process.platform === 'darwin'
-    ? path.join(__dirname, '../resources/trayIconTemplate.png')
-    : path.join(__dirname, '../resources/icon.png')
+    ? (isDev
+        ? path.join(__dirname, '../resources/trayIconTemplate.png')
+        : path.join(process.resourcesPath, 'resources/trayIconTemplate.png'))
+    : (isDev
+        ? path.join(__dirname, '../resources/icon.png')
+        : path.join(process.resourcesPath, 'resources/icon.png'))
   const icon = nativeImage.createFromPath(iconPath)
   if (process.platform === 'darwin') {
     icon.setTemplateImage(true)
