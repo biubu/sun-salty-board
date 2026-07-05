@@ -1,6 +1,7 @@
 import { useState, useEffect, useContext, useRef, useCallback } from 'react'
 import type { Settings } from '../types/clipboard'
 import { I18nContext, type Locale } from '../utils/i18n'
+import * as api from '../utils/tauriApi'
 
 type SettingsPanelProps = {
   onClose: () => void
@@ -37,7 +38,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
   const pendingSettings = useRef<Partial<Settings>>({})
   const flushPendingSettings = useCallback(() => {
     if (Object.keys(pendingSettings.current).length === 0) return
-    window.electronAPI.updateSettings(pendingSettings.current as Partial<Settings>)
+    api.updateSettings(pendingSettings.current as Partial<Settings>)
     pendingSettings.current = {}
     settingsWriteTimer.current = null
   }, [])
@@ -46,18 +47,13 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
     if (settingsWriteTimer.current) clearTimeout(settingsWriteTimer.current)
     settingsWriteTimer.current = setTimeout(flushPendingSettings, 200)
   }, [flushPendingSettings])
-  // Mirror `updateChecking` into a ref so the not-available handler can read
-  // the latest value without forcing the whole effect (5 IPC subscriptions)
-  // to tear down and rebuild every time the flag flips. Subscribing once on
-  // mount and dispatching updates by reading the ref avoids losing events
-  // that arrive during a re-subscribe window.
   const updateCheckingRef = useRef(updateChecking)
   updateCheckingRef.current = updateChecking
 
   useEffect(() => {
-    window.electronAPI.getSettings().then(setSettings)
-    window.electronAPI.getStats().then(setStats)
-    const unsubAvail = window.electronAPI.onUpdateAvailable((info) => {
+    api.getSettings().then(setSettings)
+    api.getStats().then(setStats)
+    const unsubAvail = api.onUpdateAvailable((info) => {
       const maybe = info as { version?: string }
       setUpdateChecking(false)
       setUpdateAvailable({ version: maybe?.version })
@@ -65,23 +61,21 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
       setUpdateNone(false)
       setUpdateError(null)
     })
-    const unsubNone = window.electronAPI.onUpdateNotAvailable(() => {
-      // Only surface "you're up to date" if the user explicitly asked;
-      // auto-checks at startup stay silent to avoid banner noise.
+    const unsubNone = api.onUpdateNotAvailable(() => {
       setUpdateChecking(false)
       if (updateCheckingRef.current) setUpdateNone(true)
       setUpdateAvailable(null)
     })
-    const unsubProgress = window.electronAPI.onUpdateDownloadProgress((p) => {
+    const unsubProgress = api.onUpdateDownloadProgress((p) => {
       const maybe = p as { percent?: number }
       if (typeof maybe?.percent === 'number') setUpdateProgress({ percent: maybe.percent })
     })
-    const unsubDl = window.electronAPI.onUpdateDownloaded((info) => {
+    const unsubDl = api.onUpdateDownloaded((info) => {
       const maybe = info as { version?: string }
       setUpdateDownloaded({ version: maybe?.version })
       setUpdateProgress(null)
     })
-    const unsubErr = window.electronAPI.onUpdateError((err) => {
+    const unsubErr = api.onUpdateError((err) => {
       setUpdateError(err?.message ?? 'Update check failed')
       setUpdateChecking(false)
       setUpdateProgress(null)
@@ -96,11 +90,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
     setUpdateAvailable(null)
     setUpdateDownloaded(null)
     setUpdateProgress(null)
-    window.electronAPI.checkForUpdate()
-    // If neither available nor not-available nor error fires within 30s,
-    // reset the spinner — autoUpdater silently no-ops when the publish
-    // provider is unreachable on some networks, and the UI shouldn't stay
-    // stuck in "Checking…" forever.
+    api.checkForUpdate()
     window.setTimeout(() => setUpdateChecking(false), 30_000)
   }
 
@@ -115,7 +105,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
     if (isContinuous) {
       queueSettingsWrite({ [key]: value } as Partial<Settings>)
     } else {
-      window.electronAPI.updateSettings({ [key]: value } as Partial<Settings>)
+      api.updateSettings({ [key]: value } as Partial<Settings>)
     }
     if (key === 'theme') {
       document.documentElement.setAttribute('data-theme', value as string)
@@ -182,9 +172,9 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
   }
 
   const handleClearHistory = () => {
-    window.electronAPI.clearHistory()
+    api.clearHistory()
     setShowClearConfirm(false)
-    window.electronAPI.getStats().then(setStats)
+    api.getStats().then(setStats)
   }
 
   const formatSize = (bytes: number) => {
@@ -210,7 +200,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
           {updateDownloaded && (
             <button
               className="filter-chip"
-              onClick={() => window.electronAPI.applyUpdate()}
+              onClick={() => api.applyUpdate()}
             >
               {t('settings.update_restart')}
             </button>
@@ -427,7 +417,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
               </span>
               <button
                 className="filter-chip"
-                onClick={() => window.electronAPI.applyUpdate()}
+                onClick={() => api.applyUpdate()}
               >
                 {t('settings.update_restart')}
               </button>

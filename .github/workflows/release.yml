@@ -5,9 +5,6 @@ on:
     tags:
       - 'v*'
 
-# Only one release workflow runs at a time, even if multiple tags are pushed
-# in quick succession. Without this, the publish job races itself when two
-# tags are created back-to-back and each tries to upload to a fresh release.
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -24,144 +21,84 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
         include:
           - os: ubuntu-latest
-            build-command: build:linux
+            target: x86_64-unknown-linux-gnu
             artifact-name: sunsaltyboard-linux
           - os: macos-latest
-            build-command: build:mac
+            target: aarch64-apple-darwin
             artifact-name: sunsaltyboard-macos
           - os: windows-latest
-            build-command: build:win
+            target: x86_64-pc-windows-msvc
             artifact-name: sunsaltyboard-windows
     runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
       - name: Sync version from git tag
         shell: bash
         run: |
           TAG=${GITHUB_REF_NAME#v}
           npm version "$TAG" --no-git-tag-version --allow-same-version
+          sed -i.bak "s/^version = .*/version = \"$TAG\"/" src-tauri/Cargo.toml && rm -f src-tauri/Cargo.toml.bak
 
-      # better-sqlite3 ships a prebuilt binary per Node ABI. The host Node
-      # (used by `typecheck` / `test:run`) and Electron's bundled Node (used
-      # at runtime) require different ABIs, so we rebuild twice: once for the
-      # host ABI before tests, once again for Electron before packaging.
-      - name: Cache better-sqlite3 native build
-        uses: actions/cache@v5
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
-          path: |
-            node_modules/better-sqlite3/build
-            node_modules/better-sqlite3/lib/binding
-          key: ${{ runner.os }}-bsql-${{ hashFiles('package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-bsql-
+          targets: ${{ matrix.target }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Rebuild native modules for tests (host Node ABI)
-        run: npm rebuild better-sqlite3
+      - name: Install Linux system deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf libxdo-dev
 
-      - name: Type check
-        run: npm run typecheck
-
-      - name: Run tests
-        run: npm run test:run
-
-      - name: Rebuild native modules for Electron
-        run: npx @electron/rebuild -f -w better-sqlite3
-
-      # No --publish flag here — the dedicated `publish` job below owns
-      # GitHub Releases so the three matrix builds don't race each other
-      # creating the same release. We still pass GH_TOKEN because
-      # electron-builder reads `publish.provider: github` from
-      # electron-builder.yml and aborts if no token is configured, even
-      # when not actually publishing.
-      - name: Build
+      - name: Install macOS signing cert
+        if: matrix.os == 'macos-latest' && env.APPLE_CERTIFICATE != ''
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        # Pass --publish never so electron-builder doesn't try to push to
-        # GitHub Releases itself. electron-builder.yml declares a `publish`
-        # block which triggers default-on publishing; without this flag the
-        # three matrix jobs race each other creating the same release and
-        # the macOS job loses.
-        run: npm run ${{ matrix.build-command }} -- --publish never
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN: tauri-build.keychain
+        run: |
+          echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
+          security create-keychain -p build "$KEYCHAIN"
+          security default-keychain -s "$KEYCHAIN"
+          security unlock-keychain -p build "$KEYCHAIN"
+          security import certificate.p12 -k "$KEYCHAIN" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k build "$KEYCHAIN"
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: ${{ github.ref_name }}
+          releaseBody: ''
+          releaseDraft: true
+          includeUpdaterJson: true
+          args: --target ${{ matrix.target }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.artifact-name }}
-          path: release/
+          path: src-tauri/target/release/bundle/
           if-no-files-found: ignore
-
-  publish:
-    name: Publish GitHub Release
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Download all build artifacts
-        uses: actions/download-artifact@v5
-        with:
-          path: release/
-          merge-multiple: true
-
-      - name: List downloaded artifacts
-        run: ls -la release/
-
-      # electron-updater's `publish` field in electron-builder.yml is set to
-      # GitHub; we invoke electron-builder here without rebuilding the app,
-      # only to publish the artifacts already on disk to the matching tag.
-      # electron-builder re-bundles by default, so we skip the actual build
-      # step with --config.directories.output and reuse what the matrix jobs
-      # already produced. The simplest portable path is to call
-      # `electron-builder --publish always` from the source tree but with
-      # the release/ directory overridden — however that's brittle across
-      # platforms (mac/win artifacts have platform-specific paths). Instead
-      # we let electron-builder run a no-op build by pointing it at a temp
-      # out dir and then uploading via gh CLI from release/.
-      - name: Upload release artifacts via gh CLI
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
-
-          # Collect only the installable installers and electron-updater's
-          # metadata files. Anything inside `release/mac/` is the unpacked
-          # contents of SunSaltyBoard.app (hundreds of files that don't
-          # belong as release assets) and is intentionally skipped.
-          mapfile -t ASSETS < <(
-            find release/ -maxdepth 2 -type f \
-              \( -name '*.dmg' -o -name '*.exe' -o -name '*.AppImage' \
-                 -o -name '*.zip' -o -name '*.blockmap' \
-                 -o -name 'latest.yml' -o -name 'latest-linux.yml' \
-                 -o -name 'latest-mac.yml' -o -name 'latest-windows.yml' \) \
-              | sort
-          )
-
-          if [[ ${#ASSETS[@]} -eq 0 ]]; then
-            echo "::error::No release assets found under release/"
-            exit 1
-          fi
-          echo "Uploading ${#ASSETS[@]} assets:"
-          printf '  %s\n' "${ASSETS[@]}"
-
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Creating release $TAG"
-            gh release create "$TAG" "${ASSETS[@]}" \
-              --title "$TAG" \
-              --generate-notes
-          else
-            echo "Release $TAG already exists, uploading assets"
-            gh release upload "$TAG" "${ASSETS[@]}" --clobber
-          fi

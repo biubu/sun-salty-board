@@ -6,3 +6,7 @@ release/
 .env
 .DS_Store
 .arts/
+src-tauri/target/
+src-tauri/gen/
+*.blockmap
+latest*.yml
