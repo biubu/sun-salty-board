@@ -8,7 +8,7 @@ import { createWorker, WorkerBridge, ClipboardItem } from './worker'
 import type { ClipboardEvent } from './platform-monitor'
 import {
   startMonitoring, stopMonitoring, setPollingInterval,
-  setExclusionApps, setExclusionPatterns, setCtrlState,
+  setExclusionApps, setExclusionPatterns,
 } from './platform-monitor'
 import { setupAutoUpdater } from './autoUpdater'
 import { autoUpdater } from 'electron-updater'
@@ -223,7 +223,7 @@ app.on('ready', async () => {
 
   function doPaste(item: ClipboardItem): void {
     if (item.dataType === 'image' && item.imageData) {
-      clipboard.writeImage(nativeImage.createFromBuffer(Buffer.from(item.imageData)))
+      clipboard.writeImage(nativeImage.createFromBuffer(new Uint8Array(item.imageData)))
     } else {
       clipboard.writeText(item.content)
     }

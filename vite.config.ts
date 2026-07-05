@@ -16,7 +16,6 @@ export default defineConfig({
             rollupOptions: {
               external: [
                 'better-sqlite3',
-                'electron-global-shortcut',
               ],
             },
           },
@@ -33,7 +32,6 @@ export default defineConfig({
             rollupOptions: {
               external: [
                 'better-sqlite3',
-                'electron-global-shortcut',
               ],
             },
           },
