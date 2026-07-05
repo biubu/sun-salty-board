@@ -22,8 +22,7 @@ import fs from 'fs'
 import { app } from 'electron'
 import { prepareUndo, consumeUndo, clipboardItemToUndoEntry } from './undoManager'
 import {
-  addSensitiveItem, getSensitiveItems, getSensitiveItemById,
-  removeSensitiveItem, clearSensitiveItems,
+  addSensitiveItem, getSensitiveItems,
   startEvictionTimer, stopEvictionTimer,
 } from './sensitiveItems'
 import { detectImageMimeType } from '../src/utils/magicBytes'

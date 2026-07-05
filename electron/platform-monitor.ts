@@ -1,4 +1,4 @@
-import { clipboard, nativeImage } from 'electron'
+import { clipboard } from 'electron'
 import fs from 'fs'
 
 export interface ClipboardEvent {
@@ -88,6 +88,7 @@ function readFileListFromClipboard(): string[] {
               p = decodeURIComponent(p.replace(/^file:\/\//i, ''))
             }
             if (p) paths.push(p)
+            // eslint-disable-next-line no-empty
           } catch {}
         }
       } else if (fl.includes('filename')) {
@@ -98,6 +99,7 @@ function readFileListFromClipboard(): string[] {
           paths.push(str)
         }
       }
+      // eslint-disable-next-line no-empty
     } catch {}
   }
   return [...new Set(paths)]
@@ -121,6 +123,7 @@ function looksLikeExistingFilePath(text: string): string | null {
   if (!isPathLike) return null
   try {
     if (fs.existsSync(trimmed) && fs.statSync(trimmed).isFile()) return trimmed
+    // eslint-disable-next-line no-empty
   } catch {}
   return null
 }

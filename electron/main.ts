@@ -8,7 +8,7 @@ import { createWorker, WorkerBridge, ClipboardItem } from './worker'
 import type { ClipboardEvent } from './platform-monitor'
 import {
   startMonitoring, stopMonitoring, setPollingInterval,
-  setExclusionApps, setExclusionPatterns, setCtrlState,
+  setExclusionApps, setExclusionPatterns,
 } from './platform-monitor'
 import { setupAutoUpdater } from './autoUpdater'
 import { autoUpdater } from 'electron-updater'

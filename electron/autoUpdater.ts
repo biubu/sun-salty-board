@@ -9,7 +9,7 @@ export function setupAutoUpdater(mainWindow: BrowserWindow | null): void {
   autoUpdater.autoInstallOnAppQuit = true
 
   autoUpdater.on('checking-for-update', () => {
-    console.log('[SunSaltyBoard] Checking for updates...')
+    console.warn('[SunSaltyBoard] Checking for updates...')
   })
 
   autoUpdater.on('update-available', (info) => {
