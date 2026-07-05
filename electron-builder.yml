@@ -8,6 +8,12 @@ files:
   - dist-electron/**/*
   - resources/**/*
   - package.json
+# electron-builder 26 ships an asar by default; native binary assets read
+# through `nativeImage.createFromPath` at runtime need to live outside the
+# archive or Electron's asar shim will refuse to mmap them. resources/**
+# holds the macOS template tray icon and the platform app icons.
+asarUnpack:
+  - resources/**/*
 win:
   target:
     - target: nsis

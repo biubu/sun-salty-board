@@ -223,7 +223,7 @@ app.on('ready', async () => {
 
   function doPaste(item: ClipboardItem): void {
     if (item.dataType === 'image' && item.imageData) {
-      clipboard.writeImage(nativeImage.createFromBuffer(Buffer.from(item.imageData)))
+      clipboard.writeImage(nativeImage.createFromBuffer(new Uint8Array(item.imageData)))
     } else {
       clipboard.writeText(item.content)
     }
