@@ -71,7 +71,7 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: ${{ github.ref_name }}
           releaseBody: ''
-          releaseDraft: true
+          releaseDraft: false
           includeUpdaterJson: true
           args: --target ${{ matrix.target }}
 
