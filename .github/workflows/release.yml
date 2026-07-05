@@ -35,7 +35,7 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions/setup-node@v4
         with:
@@ -53,7 +53,7 @@ jobs:
       # at runtime) require different ABIs, so we rebuild twice: once for the
       # host ABI before tests, once again for Electron before packaging.
       - name: Cache better-sqlite3 native build
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             node_modules/better-sqlite3/build
@@ -94,7 +94,7 @@ jobs:
         run: npm run ${{ matrix.build-command }} -- --publish never
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.artifact-name }}
           path: release/
@@ -107,10 +107,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Download all build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: release/
           merge-multiple: true
