@@ -86,7 +86,12 @@ jobs:
       - name: Build
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npm run ${{ matrix.build-command }}
+        # Pass --publish never so electron-builder doesn't try to push to
+        # GitHub Releases itself. electron-builder.yml declares a `publish`
+        # block which triggers default-on publishing; without this flag the
+        # three matrix jobs race each other creating the same release and
+        # the macOS job loses.
+        run: npm run ${{ matrix.build-command }} -- --publish never
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
