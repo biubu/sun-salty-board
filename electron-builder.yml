@@ -30,6 +30,16 @@ mac:
       arch:
         - x64
         - arm64
+    # electron-updater's MacUpdater only consumes .zip payloads (it pipes
+    # them through a local proxy to the bundled Squirrel.Mac for differential
+    # updates). Without a zip artifact, checkForUpdates throws
+    # ERR_UPDATER_ZIP_FILE_NOT_FOUND at runtime — even when a matching dmg
+    # exists in the same release. Keep dmg for manual installs, ship zip
+    # alongside so auto-update has something to feed Squirrel.
+    - target: zip
+      arch:
+        - x64
+        - arm64
   artifactName: ${name}-${version}-${arch}.${ext}
   category: public.app-category.utilities
   hardenedRuntime: false
