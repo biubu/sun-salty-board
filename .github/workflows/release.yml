@@ -130,21 +130,33 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
-          # Upload each file under release/ as a release asset, creating the
-          # release if it doesn't exist (idempotent: if it already does,
-          # gh release upload just adds/overwrites assets).
+
+          # Collect only the installable installers and electron-updater's
+          # metadata files. Anything inside `release/mac/` is the unpacked
+          # contents of SunSaltyBoard.app (hundreds of files that don't
+          # belong as release assets) and is intentionally skipped.
+          mapfile -t ASSETS < <(
+            find release/ -maxdepth 2 -type f \
+              \( -name '*.dmg' -o -name '*.exe' -o -name '*.AppImage' \
+                 -o -name '*.zip' -o -name '*.blockmap' \
+                 -o -name 'latest.yml' -o -name 'latest-linux.yml' \
+                 -o -name 'latest-mac.yml' -o -name 'latest-windows.yml' \) \
+              | sort
+          )
+
+          if [[ ${#ASSETS[@]} -eq 0 ]]; then
+            echo "::error::No release assets found under release/"
+            exit 1
+          fi
+          echo "Uploading ${#ASSETS[@]} assets:"
+          printf '  %s\n' "${ASSETS[@]}"
+
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             echo "Creating release $TAG"
-            gh release create "$TAG" \
+            gh release create "$TAG" "${ASSETS[@]}" \
               --title "$TAG" \
-              --generate-notes \
-              --draft
+              --generate-notes
           else
             echo "Release $TAG already exists, uploading assets"
+            gh release upload "$TAG" "${ASSETS[@]}" --clobber
           fi
-          # Push every file under release/ (recursively, preserving layout).
-          find release/ -type f -print0 | while IFS= read -r -d '' f; do
-            echo "Uploading $f"
-            gh release upload "$TAG" "$f" --clobber
-          done
-          gh release edit "$TAG" --draft=false
