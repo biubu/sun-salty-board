@@ -9,8 +9,9 @@
 // delta is visible in the build log.
 //
 // Triggered by `afterPack: scripts/after-pack.js` in electron-builder.yml.
-// electron-builder invokes this with (context) where context.packager is a
-// PlatformPackager exposing .appOutDir (the platform-specific .app path).
+// electron-builder invokes this with (context) — an AfterPackContext whose
+// `appOutDir` (note: not `packager.appOutDir`) is the platform-specific
+// .app bundle directory (e.g. .../release/mac-arm64/SunSaltyBoard.app).
 
 const fs = require('fs')
 const path = require('path')
@@ -63,9 +64,14 @@ module.exports = async function afterPack(context) {
   // AppImage build paths don't expose Electron's internals the same way.
   if (process.platform !== 'darwin') return
 
-  const appOutDir = context?.packager?.appOutDir
+  // AfterPackContext.appOutDir is the absolute path to the produced .app
+  // bundle (e.g. release/mac-arm64/SunSaltyBoard.app). Older examples in
+  // the wild use context.packager.appOutDir — that field does not exist
+  // on electron-builder 26's PlatformPackager at this stage and silently
+  // resolves to undefined, which would skip the trim entirely.
+  const appOutDir = context?.appOutDir
   if (!appOutDir || !fs.existsSync(appOutDir)) {
-    console.warn('[after-pack] appOutDir missing, skipping trim')
+    console.warn(`[after-pack] appOutDir missing (${appOutDir}), skipping trim`)
     return
   }
 
