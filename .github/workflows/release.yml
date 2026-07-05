@@ -60,14 +60,22 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Rebuild native modules for Electron
-        run: npx @electron/rebuild -f -w better-sqlite3
+      # Tests run on the host Node 22 (NODE_MODULE_VERSION 127). After the
+      # Electron rebuild below flips better-sqlite3 to ABI 148, the test step
+      # would fail with ERR_DLOPEN_FAILED — so rebuild back to the host ABI
+      # before running tests, then rebuild again for Electron before the
+      # actual packaging step.
+      - name: Rebuild native modules for tests (host Node ABI)
+        run: npm rebuild better-sqlite3
 
       - name: Type check
         run: npm run typecheck
 
       - name: Run tests
         run: npm run test:run
+
+      - name: Rebuild native modules for Electron
+        run: npx @electron/rebuild -f -w better-sqlite3
 
       - name: Build and publish
         env:
