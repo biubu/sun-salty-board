@@ -48,6 +48,8 @@
   },
   "allowScripts": {
     "electron@43.0.0": true,
-    "better-sqlite3@12.11.1": true
+    "better-sqlite3@12.11.1": true,
+    "electron-winstaller@5.4.0": true,
+    "fsevents@2.3.3": true
   }
 }
