@@ -8,12 +8,30 @@ files:
   - dist-electron/**/*
   - resources/**/*
   - package.json
+  # better-sqlite3 ships with sqlite3 source (deps/), C++ sources (src/),
+  # a CLI tool (bin/) and prebuilt-object intermediates (build/Release/obj/).
+  # Only the prebuilt native binding is needed at runtime; everything else
+  # bloats the asar by ~22 MB.
+  - node_modules/better-sqlite3/build/Release/better_sqlite3.node
+  - node_modules/better-sqlite3/build/Release/*.dylib
+  - node_modules/better-sqlite3/lib/**/*
+  - node_modules/better-sqlite3/package.json
 # electron-builder 26 ships an asar by default; native binary assets read
-# through `nativeImage.createFromPath` at runtime need to live outside the
-# archive or Electron's asar shim will refuse to mmap them. resources/**
-# holds the macOS template tray icon and the platform app icons.
+# through `nativeImage.createFromPath` or required as a Node native module
+# at runtime need to live outside the archive or Electron's asar shim will
+# refuse to mmap them. resources/** holds the macOS template tray icon and
+# the platform app icons. better_sqlite3.node is the native binding for
+# better-sqlite3 and must be loadable by Node's module loader.
 asarUnpack:
   - resources/**/*
+  - node_modules/better-sqlite3/build/Release/better_sqlite3.node
+  - node_modules/better-sqlite3/build/Release/*.dylib
+# Trim Electron Framework down to the essentials after packaging: drop the
+# SwiftShader software-Vulkan fallback (Macs have GPUs), the bundled ffmpeg
+# (we never play video in a clipboard manager) and Chromium's localised UI
+# resources for every locale except English and Simplified Chinese. See
+# scripts/after-pack.js for the implementation.
+afterPack: scripts/after-pack.js
 win:
   target:
     - target: nsis
