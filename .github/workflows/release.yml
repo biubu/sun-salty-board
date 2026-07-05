@@ -79,8 +79,13 @@ jobs:
 
       # No --publish flag here — the dedicated `publish` job below owns
       # GitHub Releases so the three matrix builds don't race each other
-      # creating the same release.
+      # creating the same release. We still pass GH_TOKEN because
+      # electron-builder reads `publish.provider: github` from
+      # electron-builder.yml and aborts if no token is configured, even
+      # when not actually publishing.
       - name: Build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm run ${{ matrix.build-command }}
 
       - name: Upload artifacts
