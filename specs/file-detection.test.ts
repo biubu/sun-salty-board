@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 
-// Stand-in for Electron's `clipboard` API so we can drive
-// readFileListFromClipboard without a real Electron runtime.
+// Stand-in for the clipboard API so we can drive
+// readFileListFromClipboard without a real clipboard runtime.
 function makeFakeClipboard(formats: Record<string, string>) {
   return {
     availableFormats: () => Object.keys(formats),

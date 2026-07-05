@@ -21,9 +21,11 @@ pub fn create_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     let icon = {
-        let _img_bytes = include_bytes!("../icons/32x32.png");
-        let rgba = vec![0u8; 32 * 32 * 4];
-        tauri::image::Image::new_owned(rgba, 32, 32)
+        let img_bytes = include_bytes!("../icons/32x32.png");
+        let img = image::load_from_memory(img_bytes).expect("Failed to decode tray icon");
+        let rgba = img.to_rgba8();
+        let (width, height) = rgba.dimensions();
+        tauri::image::Image::new_owned(rgba.into_raw(), width, height)
     };
 
     TrayIconBuilder::new()

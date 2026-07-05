@@ -51,9 +51,7 @@ async function main() {
     const ico = createIco(png512)
     writeFileSync(join(resourcesDir, 'icon.ico'), ico)
 
-    // macOS template icon: alpha-only PNG at 22pt + 44pt so Electron picks
-    // the right one for Retina. The file naming `trayIconTemplate@2x.png`
-    // is required for nativeImage to detect the multi-resolution asset.
+    // macOS template icon: alpha-only PNG at 22pt + 44pt for Retina
     writeFileSync(join(resourcesDir, 'trayIconTemplate.svg'), traySvg)
     const tray22 = await sharp(Buffer.from(traySvg)).resize(22, 22).png().toBuffer()
     writeFileSync(join(resourcesDir, 'trayIconTemplate.png'), tray22)

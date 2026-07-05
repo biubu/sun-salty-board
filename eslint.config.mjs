@@ -20,7 +20,7 @@ export default [
   {
     ignores: [
       'dist/**',
-      'dist-electron/**',
+
       'release/**',
       'node_modules/**',
       'eslint.config.js',
@@ -29,7 +29,7 @@ export default [
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    files: ['src/**/*.{ts,tsx}', 'electron/**/*.ts', 'specs/**/*.ts'],
+    files: ['src/**/*.{ts,tsx}', 'specs/**/*.ts'],
     languageOptions: {
       globals: {
         window: 'readonly',
