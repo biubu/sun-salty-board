@@ -4,6 +4,8 @@
   "description": "Cross-platform clipboard manager with high-capacity history",
   "author": "biubu",
   "scripts": {
+    "dev:web": "vite",
+    "build:web": "vite build",
     "dev": "tauri dev",
     "build": "tauri build",
     "preview": "vite preview",
