@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from 'react'
 import { ClipboardItem } from '../types/clipboard'
 import { useI18n, useNow } from '../utils/i18n'
 import { imageRef, imageUnref } from '../utils/imageUrl'
+import * as api from '../utils/tauriApi'
 
 type HistoryItemProps = {
   item: ClipboardItem
@@ -77,7 +78,7 @@ export default function HistoryItem({ item, isActive, onSelect, onDelete, onTogg
 
   const handleUndo = async (e: React.MouseEvent) => {
     e.stopPropagation()
-    await window.electronAPI.undoDelete()
+    await api.undoDelete()
     setShowUndo(false)
     setDeletedId(null)
   }

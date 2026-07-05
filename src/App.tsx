@@ -5,14 +5,13 @@ import FilterChips from './components/FilterChips'
 import SettingsPanel from './components/SettingsPanel'
 import { I18nContext, type Locale } from './utils/i18n'
 import type { ClipboardItem } from './types/clipboard'
+import * as api from './utils/tauriApi'
 
 export type FilterType = 'all' | 'text' | 'richtext' | 'image' | 'files' | 'favorites'
 
 export default function App() {
   const [items, setItems] = useState<ClipboardItem[]>([])
   const [searchQuery, setSearchQuery] = useState('')
-  // Debounced query that drives the (possibly IPC-backed) filter pipeline.
-  // Keeping the raw `searchQuery` lets the <input> stay responsive on every keystroke.
   const [debouncedQuery, setDebouncedQuery] = useState('')
   const [activeFilter, setActiveFilter] = useState<FilterType>('all')
   const [selectedCategoryId, setSelectedCategoryId] = useState<number | null>(null)
@@ -23,14 +22,14 @@ export default function App() {
   selectedIndexRef.current = selectedIndex
 
   useEffect(() => {
-    window.electronAPI.getHistory().then(setItems)
-    const unsub1 = window.electronAPI.onHistoryUpdate(setItems)
-    const unsub2 = window.electronAPI.onOpenSettings(() => setShowSettings(true))
+    api.getHistory().then(setItems)
+    const unsub1 = api.onHistoryUpdate(setItems)
+    const unsub2 = api.onOpenSettings(() => setShowSettings(true))
     return () => { unsub1(); unsub2() }
   }, [])
 
   useEffect(() => {
-    window.electronAPI.getSettings().then((s) => {
+    api.getSettings().then((s) => {
       document.documentElement.setAttribute('data-theme', s.theme)
       setLocale((s.locale as Locale) || 'en')
     })
@@ -74,11 +73,9 @@ export default function App() {
       const target = e.target as HTMLElement | null
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return
       if (e.key >= '1' && e.key <= '9') {
-        // Renderer passes the raw digit; main.ts treats the value as a
-        // 1-based position so "press 1 → paste first item".
-        window.electronAPI.pasteByIndex(parseInt(e.key, 10))
+        api.pasteByIndex(parseInt(e.key, 10))
       } else if (e.key === '0') {
-        window.electronAPI.pasteByIndex(0)
+        api.pasteByIndex(0)
       } else if (e.key === 'ArrowUp') {
         e.preventDefault()
         setSelectedIndex((i) => (i > 0 ? i - 1 : filteredRef.current.length - 1))
@@ -88,7 +85,7 @@ export default function App() {
       } else if (e.key === 'Enter') {
         e.preventDefault()
         const item = filteredRef.current[selectedIndexRef.current]
-        if (item) window.electronAPI.pasteItem(item.id)
+        if (item) api.pasteItem(item.id)
       }
     }
     window.addEventListener('keydown', handler)
@@ -127,17 +124,12 @@ export default function App() {
         <HistoryPanel
           items={filteredItems}
           selectedIndex={selectedIndex}
-          onSelect={(item) => window.electronAPI.pasteItem(item.id)}
+          onSelect={(item) => api.pasteItem(item.id)}
           onDelete={(id) => {
-            // delete-item IPC handler pushes a `history-update` broadcast,
-            // which the App-level onHistoryUpdate subscription above already
-            // applies to setItems. An explicit getHistory() here would race
-            // with that push and is unnecessary.
-            window.electronAPI.deleteItem(id)
+            api.deleteItem(id)
           }}
           onToggleFavorite={(id) => {
-            // Same as onDelete — toggle-favorite pushes history-update.
-            window.electronAPI.toggleFavorite(id)
+            api.toggleFavorite(id)
           }}
         />
       </main>

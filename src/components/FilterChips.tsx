@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { FilterType } from '../App'
 import type { Category } from '../types/clipboard'
 import { useI18n } from '../utils/i18n'
+import * as api from '../utils/tauriApi'
 
 const FILTERS: { key: FilterType; i18nKey: string }[] = [
   { key: 'all', i18nKey: 'filter.all' },
@@ -23,7 +24,7 @@ export default function FilterChips({ activeFilter, onFilterChange, selectedCate
   const [categories, setCategories] = useState<Category[]>([])
 
   useEffect(() => {
-    window.electronAPI.getCategories().then(setCategories)
+    api.getCategories().then(setCategories)
   }, [])
 
   return (
