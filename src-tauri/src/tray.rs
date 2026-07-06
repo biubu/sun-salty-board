@@ -28,22 +28,24 @@ pub fn create_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         tauri::image::Image::new_owned(rgba.into_raw(), width, height)
     };
 
-    TrayIconBuilder::new()
+TrayIconBuilder::new()
         .icon(icon)
         .menu(&menu)
         .on_menu_event(|app, event| {
             match event.id().as_ref() {
                 "open_history" => {
                     if let Some(window) = app.get_webview_window("main") {
+                        crate::paste::save_frontmost_app(app);
                         let _ = window.show();
                         let _ = window.set_focus();
                     }
                 }
                 "settings" => {
                     if let Some(window) = app.get_webview_window("main") {
+                        crate::paste::save_frontmost_app(app);
                         let _ = window.show();
                         let _ = window.set_focus();
-                        let _ = window.emit("navigate", "settings");
+                        let _ = app.emit("navigate", "settings");
                     }
                 }
                 "about" => {
@@ -62,6 +64,7 @@ pub fn create_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             } = event {
                 let app = tray.app_handle();
                 if let Some(window) = app.get_webview_window("main") {
+                    crate::paste::save_frontmost_app(app);
                     let _ = window.show();
                     let _ = window.set_focus();
                 }

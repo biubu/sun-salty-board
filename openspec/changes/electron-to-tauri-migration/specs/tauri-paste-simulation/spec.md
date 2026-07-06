@@ -5,7 +5,8 @@ The system SHALL simulate a paste operation to paste selected clipboard history 
 
 #### Scenario: Paste on macOS
 - **WHEN** user selects a history item to paste on macOS
-- **THEN** the system SHALL execute `osascript -e 'tell application "System Events" to keystroke "v" using command down'`
+- **THEN** the system SHALL restore focus to the previously-frontmost application (captured via `NSWorkspace.frontmostApplication` before our window is shown), deactivate our app, activate the previously-frontmost app via `NSRunningApplication.activateWithOptions(NSApplicationActivateIgnoringOtherApps)`, and post a Cmd+V keystroke via `CGEventPost` (key code 9, `CGEventFlagCommand`)
+- **AND** the system SHALL check `AXIsProcessTrustedWithOptions` and warn if Accessibility permission is not granted
 
 #### Scenario: Paste on Windows
 - **WHEN** user selects a history item to paste on Windows

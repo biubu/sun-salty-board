@@ -192,6 +192,15 @@ impl Database {
         Ok((total, today))
     }
 
+    pub fn get_favorites_count(&self) -> Result<i64, Box<dyn std::error::Error>> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM items WHERE favorite = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
     pub fn conn(&self) -> &Connection {
         &self.conn
     }

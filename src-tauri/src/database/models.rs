@@ -2,26 +2,6 @@ use serde::{Deserialize, Serialize};
 use rusqlite::Row;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ItemType {
-    Text = 0,
-    RichText = 1,
-    Image = 2,
-    File = 3,
-}
-
-impl ItemType {
-    pub fn from_i32(n: i32) -> Self {
-        match n {
-            0 => ItemType::Text,
-            1 => ItemType::RichText,
-            2 => ItemType::Image,
-            3 => ItemType::File,
-            _ => ItemType::Text,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClipboardItem {
     pub id: i64,
     #[serde(rename = "type")]
@@ -55,14 +35,6 @@ impl ClipboardItem {
             categories: None,
         }
     }
-
-    pub fn to_csv_line(&self) -> String {
-        format!(
-            "{},{},{:?},{:?},{},{},{},{}",
-            self.id, self.item_type, self.content, self.rich_text,
-            self.fingerprint, self.sensitive, self.favorite, self.created_at
-        )
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,15 +43,4 @@ pub struct Category {
     pub name: String,
     pub color: Option<String>,
     pub created_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Setting {
-    pub key: String,
-    pub value: String,
-}
-
-pub struct UndoEntry {
-    pub item: ClipboardItem,
-    pub expires_at: std::time::Instant,
 }

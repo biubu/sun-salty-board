@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "SunSaltyBoard",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "identifier": "com.sunsaltyboard",
   "build": {
     "frontendDist": "../dist",
@@ -21,7 +21,8 @@
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "center": true,
-        "focus": true
+        "focus": false,
+        "visible": false
       }
     ],
     "security": {
@@ -43,7 +44,9 @@
       "signingIdentity": "-"
     },
     "windows": {
-      "wix": null
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
     },
     "linux": {
       "deb": {

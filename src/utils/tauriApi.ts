@@ -31,14 +31,44 @@ export async function searchHistory(query: string): Promise<ClipboardItem[]> {
   return mapItems(raw)
 }
 
-export function pasteItem(_id: number) {
-  invoke('paste_item')
+let pasteInFlight = false
+
+export async function pasteItem(itemId: number) {
+  console.log('[pasteItem] called itemId=', itemId)
+  if (!Number.isFinite(itemId) || itemId <= 0) {
+    console.warn('[pasteItem] ignoring invalid itemId', itemId)
+    return
+  }
+  if (pasteInFlight) {
+    console.log('[pasteItem] already in flight, ignoring duplicate click')
+    invoke('log_to_rust', { level: 'warn', msg: `[pasteItem] already in flight, ignoring duplicate click itemId=${itemId}` }).catch(() => {})
+    return
+  }
+  invoke('log_to_rust', { level: 'info', msg: `[pasteItem] ENTER itemId=${itemId}` }).catch(() => {})
+  pasteInFlight = true
+  try {
+    try {
+      await invoke('hide_window')
+      console.log('[pasteItem] window hidden')
+    } catch (e) {
+      console.error('[pasteItem] hide_window failed:', e)
+      throw e
+    }
+    await new Promise(r => setTimeout(r, 200))
+    try {
+      await invoke('paste_item', { itemId })
+      console.log('[pasteItem] paste_item OK')
+    } catch (e) {
+      console.error('[pasteItem] paste_item failed:', e)
+      throw e
+    }
+  } finally {
+    setTimeout(() => { pasteInFlight = false }, 800)
+  }
 }
 
-export function pasteByIndex(_index: number) {
-  getHistory().then(() => {
-    invoke('paste_item')
-  })
+export function hideWindow() {
+  invoke('hide_window')
 }
 
 export function deleteItem(id: number) {
@@ -46,7 +76,8 @@ export function deleteItem(id: number) {
 }
 
 export async function undoDelete(): Promise<ClipboardItem | null> {
-  return null
+  const raw = await invoke<unknown | null>('undo_delete')
+  return raw ? mapItem(raw) : null
 }
 
 export function toggleFavorite(id: number) {
@@ -102,18 +133,19 @@ export function updateSettings(settings: Partial<Settings>) {
 }
 
 export async function getStats(): Promise<{ totalItems: number; favoriteItems: number; dbSize: number }> {
-  const raw = await invoke<{ total_items: number; today_items: number }>('get_stats')
-  return { totalItems: raw.total_items, favoriteItems: 0, dbSize: 0 }
+  const raw = await invoke<{ total_items: number; today_items: number; favorite_items: number; db_size: number }>('get_stats')
+  return { totalItems: raw.total_items, favoriteItems: raw.favorite_items, dbSize: raw.db_size }
 }
 
 export async function getSensitiveItems(): Promise<SensitiveItem[]> {
   return []
 }
 
-export function onHistoryUpdate(callback: (items: ClipboardItem[]) => void): () => void {
+export function onHistoryUpdate(callback: (item: ClipboardItem) => void): () => void {
   let unsub: UnlistenFn | undefined
-  listen<unknown[]>('clipboard-changed', () => {
-    getHistory().then(callback)
+  listen<any>('clipboard-changed', (event) => {
+    const item = mapItem(event.payload)
+    callback(item)
   }).then(fn => { unsub = fn })
   return () => { if (unsub) unsub() }
 }

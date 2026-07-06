@@ -10,6 +10,9 @@ use state::AppState;
 use tauri::Manager;
 use tauri_plugin_global_shortcut::{Code, Modifiers, GlobalShortcutExt, ShortcutState};
 
+#[cfg(target_os = "macos")]
+use tauri::ActivationPolicy;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -26,6 +29,7 @@ pub fn run() {
                         if window.is_visible().unwrap_or(false) {
                             let _ = window.hide();
                         } else {
+                            crate::paste::save_frontmost_app(app);
                             let pos = crate::commands::window::get_cursor_position();
                             if let Some((x, y)) = pos {
                                 let w = 480;
@@ -57,11 +61,19 @@ pub fn run() {
 
             tray::create_tray(app.handle())?;
 
+            #[cfg(target_os = "macos")]
+            {
+                app.set_activation_policy(ActivationPolicy::Accessory);
+                crate::paste::check_accessibility_and_log();
+            }
+
             let win = app.get_webview_window("main").unwrap();
             let win_clone = win.clone();
             win.on_window_event(move |event| {
                 if let tauri::WindowEvent::Focused(false) = event {
-                    let _ = win_clone.hide();
+                    if win_clone.is_visible().unwrap_or(false) {
+                        let _ = win_clone.hide();
+                    }
                 }
             });
 
@@ -114,7 +126,9 @@ pub fn run() {
             commands::window::toggle_window,
             commands::app::get_version,
             commands::app::get_platform,
+            commands::app::log_to_rust,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app_handle, _event| {});
 }

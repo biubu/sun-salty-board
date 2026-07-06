@@ -1,6 +1,5 @@
 use arboard::Clipboard;
 use sha2::{Sha256, Digest};
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 use crate::database::ClipboardItem;
@@ -30,53 +29,38 @@ fn compute_fingerprint(content: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-struct SensitiveStore {
-    items: HashMap<i64, Instant>,
-    max_items: usize,
-}
-
-impl SensitiveStore {
-    fn new() -> Self {
-        Self { items: HashMap::new(), max_items: 1000 }
-    }
-}
-
-struct UndoManager {
-    entries: Vec<(ClipboardItem, Instant)>,
-    max_entries: usize,
-    ttl: Duration,
-}
-
-impl UndoManager {
-    fn new() -> Self {
-        Self { entries: Vec::new(), max_entries: 8, ttl: Duration::from_secs(5) }
-    }
-
-    fn push(&mut self, item: ClipboardItem) {
-        self.entries.push((item, Instant::now()));
-        if self.entries.len() > self.max_entries {
-            self.entries.remove(0);
-        }
-    }
-
-    fn pop(&mut self) -> Option<ClipboardItem> {
-        while let Some(entry) = self.entries.last() {
-            if entry.1.elapsed() > self.ttl {
-                self.entries.pop();
-            } else {
-                return self.entries.pop().map(|e| e.0);
+fn load_exclusion_rules(app: &AppHandle, clip_state: &mut ClipboardState) {
+    if let Some(state) = app.try_state::<AppState>() {
+        if let Ok(db) = state.db.lock() {
+            if let Ok(mut stmt) = db.conn().prepare(
+                "SELECT value FROM settings WHERE key = 'exclusionPatterns'"
+            ) {
+                if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+                    for row in rows.flatten() {
+                        clip_state.exclusion_rules = row
+                            .split('\n')
+                            .filter(|p| !p.is_empty())
+                            .map(|p| (String::new(), p.to_string()))
+                            .collect();
+                    }
+                }
             }
         }
-        None
     }
 }
 
 pub fn start_monitoring(app: AppHandle) {
     let mut clip_state = ClipboardState::new();
     let dedup_window = Duration::from_millis(100);
+    let mut last_exclusion_load = Instant::now();
 
     loop {
         std::thread::sleep(Duration::from_millis(500));
+
+        if last_exclusion_load.elapsed() > Duration::from_secs(30) {
+            load_exclusion_rules(&app, &mut clip_state);
+            last_exclusion_load = Instant::now();
+        }
 
         if let Ok(mut clipboard) = Clipboard::new() {
             let (content, item_type, rich_text, file_paths) = if let Ok(text) = clipboard.get_text() {

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, useContext } from 'react'
+import { useState, useEffect, useMemo, useRef, useContext, useCallback } from 'react'
 import HistoryPanel from './components/HistoryPanel'
 import SearchBar from './components/SearchBar'
 import FilterChips from './components/FilterChips'
@@ -8,6 +8,8 @@ import type { ClipboardItem } from './types/clipboard'
 import * as api from './utils/tauriApi'
 
 export type FilterType = 'all' | 'text' | 'richtext' | 'image' | 'files' | 'favorites'
+
+const MAX_ITEMS = 10000
 
 export default function App() {
   const [items, setItems] = useState<ClipboardItem[]>([])
@@ -20,13 +22,17 @@ export default function App() {
   const { t, setLocale } = useContext(I18nContext)
   const selectedIndexRef = useRef(selectedIndex)
   selectedIndexRef.current = selectedIndex
+  const debouncedQueryRef = useRef(debouncedQuery)
+  debouncedQueryRef.current = debouncedQuery
+
+  const refreshItems = useCallback(async (query?: string) => {
+    const result = query ? await api.searchHistory(query) : await api.getHistory()
+    setItems(result)
+  }, [])
 
   useEffect(() => {
-    api.getHistory().then(setItems)
-    const unsub1 = api.onHistoryUpdate(setItems)
-    const unsub2 = api.onOpenSettings(() => setShowSettings(true))
-    return () => { unsub1(); unsub2() }
-  }, [])
+    refreshItems()
+  }, [refreshItems])
 
   useEffect(() => {
     api.getSettings().then((s) => {
@@ -35,18 +41,31 @@ export default function App() {
     })
   }, [setLocale])
 
+  useEffect(() => {
+    const unsub1 = api.onHistoryUpdate((newItem) => {
+      if (debouncedQueryRef.current) {
+        refreshItems(debouncedQueryRef.current)
+      } else {
+        setItems(prev => [newItem, ...prev].slice(0, MAX_ITEMS))
+      }
+    })
+    const unsub2 = api.onOpenSettings(() => setShowSettings(true))
+    return () => { unsub1(); unsub2() }
+  }, [refreshItems])
+
   // 200ms debounce so a fast typist doesn't refilter the whole list on every keystroke.
   useEffect(() => {
     const id = setTimeout(() => setDebouncedQuery(searchQuery), 200)
     return () => clearTimeout(id)
   }, [searchQuery])
 
+  // When debounced query changes, fetch from backend
+  useEffect(() => {
+    refreshItems(debouncedQuery || undefined)
+  }, [debouncedQuery, refreshItems])
+
   const filteredItems = useMemo(() => {
     let result = items
-    if (debouncedQuery) {
-      const q = debouncedQuery.toLowerCase()
-      result = result.filter((item) => item.content.toLowerCase().includes(q))
-    }
     if (activeFilter === 'favorites') {
       result = result.filter((item) => item.isFavorite)
     } else if (activeFilter === 'text') {
@@ -58,9 +77,8 @@ export default function App() {
       result = result.filter((item) => item.categoryIds.includes(selectedCategoryId))
     }
     return result
-  }, [items, debouncedQuery, activeFilter, selectedCategoryId])
+  }, [items, activeFilter, selectedCategoryId])
 
-  // Reset selection when filters change so we never point past the end of the list.
   useEffect(() => {
     setSelectedIndex((i) => (i >= filteredItems.length ? 0 : i))
   }, [filteredItems.length])
@@ -73,9 +91,12 @@ export default function App() {
       const target = e.target as HTMLElement | null
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return
       if (e.key >= '1' && e.key <= '9') {
-        api.pasteByIndex(parseInt(e.key, 10))
+        const idx = parseInt(e.key, 10) - 1
+        const item = filteredRef.current[idx]
+        if (item) api.pasteItem(item.id)
       } else if (e.key === '0') {
-        api.pasteByIndex(0)
+        const item = filteredRef.current[9]
+        if (item) api.pasteItem(item.id)
       } else if (e.key === 'ArrowUp') {
         e.preventDefault()
         setSelectedIndex((i) => (i > 0 ? i - 1 : filteredRef.current.length - 1))
@@ -86,6 +107,8 @@ export default function App() {
         e.preventDefault()
         const item = filteredRef.current[selectedIndexRef.current]
         if (item) api.pasteItem(item.id)
+      } else if (e.key === 'Escape') {
+        api.hideWindow()
       }
     }
     window.addEventListener('keydown', handler)
