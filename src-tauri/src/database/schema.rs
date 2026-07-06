@@ -8,6 +8,8 @@ pub fn initialize(conn: &Connection) -> Result<(), rusqlite::Error> {
             content TEXT,
             rich_text TEXT,
             file_paths TEXT,
+            image_data BLOB,
+            image_mime TEXT,
             fingerprint TEXT NOT NULL,
             sensitive INTEGER NOT NULL DEFAULT 0,
             favorite INTEGER NOT NULL DEFAULT 0,
@@ -58,6 +60,30 @@ pub fn initialize(conn: &Connection) -> Result<(), rusqlite::Error> {
             INSERT INTO items_fts(rowid, content) VALUES (new.id, new.content);
         END;"
     )?;
+    Ok(())
+}
+
+// Add image columns to existing databases that pre-date this schema.
+// New `initialize()` already creates them inline, so this is only a fallback
+// for databases created by older versions. Idempotent — the ALTER is skipped
+// when the column already exists.
+pub fn migrate_add_image_columns(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let has_image_data: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = 'image_data'",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_image_data {
+        conn.execute_batch("ALTER TABLE items ADD COLUMN image_data BLOB;")?;
+    }
+    let has_image_mime: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = 'image_mime'",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_image_mime {
+        conn.execute_batch("ALTER TABLE items ADD COLUMN image_mime TEXT;")?;
+    }
     Ok(())
 }
 

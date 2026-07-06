@@ -49,8 +49,18 @@ export default function App() {
         setItems(prev => [newItem, ...prev].slice(0, MAX_ITEMS))
       }
     })
-    const unsub2 = api.onOpenSettings(() => setShowSettings(true))
-    return () => { unsub1(); unsub2() }
+    const unsub2 = api.onHistoryCleared(() => {
+      // Backend has wiped the rows; drop the in-memory list so the empty
+      // state shows up immediately. Preserve any active search filter by
+      // re-running it against the (now empty) backend result.
+      if (debouncedQueryRef.current) {
+        refreshItems(debouncedQueryRef.current)
+      } else {
+        setItems([])
+      }
+    })
+    const unsub3 = api.onOpenSettings(() => setShowSettings(true))
+    return () => { unsub1(); unsub2(); unsub3() }
   }, [refreshItems])
 
   // 200ms debounce so a fast typist doesn't refilter the whole list on every keystroke.

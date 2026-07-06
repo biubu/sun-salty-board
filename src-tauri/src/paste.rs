@@ -1,23 +1,175 @@
 use arboard::Clipboard;
+use sha2::{Sha256, Digest};
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
-use tauri::Manager;
+use tauri::{AppHandle, Manager};
+
+use crate::database::ItemType;
+use crate::state::AppState;
 
 static PASTE_LAST_END: Mutex<Option<Instant>> = Mutex::new(None);
 
-pub fn paste_content(content: String, app: &tauri::AppHandle) -> Result<(), String> {
-    log::info!("[paste_content] called, content_len={}", content.len());
+fn fingerprint_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+fn fingerprint_text(text: &str) -> String {
+    fingerprint_bytes(text.as_bytes())
+}
+
+fn set_last_fingerprint(app: &AppHandle, fingerprint: String) {
+    if let Some(state) = app.try_state::<AppState>() {
+        if let Ok(mut fp) = state.last_clipboard_fingerprint.lock() {
+            *fp = fingerprint;
+        }
+    }
+}
+
+// Persist `bytes` (and optional `mime`) onto the system clipboard as the
+// richest available representation. Caller is responsible for also setting
+// any plain-text fallback via `set_clipboard_text` when appropriate.
+fn set_clipboard_image(bytes: &[u8], mime: &str) -> Result<(), String> {
+    let img = image::load_from_memory(bytes)
+        .map_err(|e| format!("failed to decode stored image (mime={mime}): {e}"))?;
+    let rgba = img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let image = arboard::ImageData {
+        width: w as usize,
+        height: h as usize,
+        bytes: std::borrow::Cow::Owned(rgba.into_raw()),
+    };
+    let mut cb = Clipboard::new().map_err(|e| format!("Failed to open clipboard: {}", e))?;
+    cb.set_image(image)
+        .map_err(|e| format!("Failed to set clipboard image: {}", e))?;
+    Ok(())
+}
+
+fn set_clipboard_text(text: &str) -> Result<(), String> {
+    let mut cb = Clipboard::new().map_err(|e| format!("Failed to open clipboard: {}", e))?;
+    cb.set_text(text)
+        .map_err(|e| format!("Failed to set clipboard text: {}", e))?;
+    Ok(())
+}
+
+fn set_clipboard_html(html: &str, alt: &str) -> Result<(), String> {
+    let mut cb = Clipboard::new().map_err(|e| format!("Failed to open clipboard: {}", e))?;
+    cb.set_html(html, Some(alt))
+        .map_err(|e| format!("Failed to set clipboard html: {}", e))?;
+    Ok(())
+}
+
+fn set_clipboard_files(paths: &[String]) -> Result<(), String> {
+    use std::path::PathBuf;
+    let pbs: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+    let mut cb = Clipboard::new().map_err(|e| format!("Failed to open clipboard: {}", e))?;
+    cb.set().file_list(pbs.as_slice())
+        .map_err(|e| format!("Failed to set clipboard file list: {}", e))?;
+    Ok(())
+}
+
+// Read whatever is currently on the clipboard, in the same priority order
+// `clipboard::capture_clipboard` uses, so the "original" snapshot taken
+// before a paste round-trips through the same fallback rules. Returns
+// `None` if nothing on the clipboard can be represented.
+enum ClipboardSnapshot {
+    Text(String, Option<String>), // text, optional html
+    Image(Vec<u8>),
+    Files(Vec<String>),
+    Empty,
+}
+
+fn snapshot_clipboard() -> ClipboardSnapshot {
+    let Ok(mut cb) = Clipboard::new() else {
+        return ClipboardSnapshot::Empty;
+    };
+    if let Ok(text) = cb.get_text() {
+        if !text.is_empty() {
+            let html = cb.get().html().ok().filter(|h| !h.is_empty());
+            return ClipboardSnapshot::Text(text, html);
+        }
+    }
+    if let Ok(image) = cb.get_image() {
+        return ClipboardSnapshot::Image(image.bytes.as_ref().to_vec());
+    }
+    if let Ok(paths) = cb.get().file_list() {
+        if !paths.is_empty() {
+            return ClipboardSnapshot::Files(
+                paths
+                    .iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect(),
+            );
+        }
+    }
+    ClipboardSnapshot::Empty
+}
+
+fn fingerprint_of_snapshot(snap: &ClipboardSnapshot) -> String {
+    match snap {
+        ClipboardSnapshot::Text(text, html) => {
+            // Prefer the HTML fingerprint when present so a rich restore
+            // collides with the rich original even if the alt-text happens
+            // to match some other item.
+            if let Some(h) = html {
+                return fingerprint_text(h);
+            }
+            fingerprint_text(text)
+        }
+        ClipboardSnapshot::Image(bytes) => fingerprint_bytes(bytes),
+        ClipboardSnapshot::Files(paths) => fingerprint_text(&paths.join("\n")),
+        ClipboardSnapshot::Empty => String::new(),
+    }
+}
+
+fn restore_snapshot(snap: ClipboardSnapshot) {
+    let result: Result<(), String> = match snap {
+        ClipboardSnapshot::Text(text, Some(html)) => set_clipboard_html(&html, &text),
+        ClipboardSnapshot::Text(text, None) => set_clipboard_text(&text),
+        ClipboardSnapshot::Image(bytes) => {
+            // We only stored the encoded bytes via the paste path;
+            // reconstruct the image via the `image` crate so arboard can
+            // hand it back to the next reader.
+            set_clipboard_image(&bytes, "image/png")
+        }
+        ClipboardSnapshot::Files(paths) => set_clipboard_files(&paths),
+        ClipboardSnapshot::Empty => Ok(()),
+    };
+    if let Err(e) = result {
+        log::warn!("[paste] failed to restore clipboard snapshot: {}", e);
+    }
+}
+
+pub struct PastePayload<'a> {
+    pub item_type: ItemType,
+    pub content: Option<&'a str>,
+    pub rich_text: Option<&'a str>,
+    pub file_paths: Option<&'a [String]>,
+    pub image_data: Option<&'a [u8]>,
+    pub image_mime: Option<&'a str>,
+}
+
+pub fn paste_payload(payload: PastePayload<'_>, app: &tauri::AppHandle) -> Result<(), String> {
+    log::info!(
+        "[paste_payload] called, type={:?} content_len={} html_len={} files={} image_bytes={}",
+        payload.item_type,
+        payload.content.map(|s| s.len()).unwrap_or(0),
+        payload.rich_text.map(|s| s.len()).unwrap_or(0),
+        payload.file_paths.map(|v| v.len()).unwrap_or(0),
+        payload.image_data.map(|b| b.len()).unwrap_or(0),
+    );
 
     {
         let mut last = PASTE_LAST_END.lock().map_err(|e| {
-            log::error!("[paste_content] guard lock failed: {}", e);
+            log::error!("[paste_payload] guard lock failed: {}", e);
             format!("guard poisoned: {}", e)
         })?;
         if let Some(t) = *last {
             if t.elapsed() < Duration::from_millis(1500) {
                 log::warn!(
-                    "[paste_content] previous paste ended {}ms ago, skipping to prevent burst",
+                    "[paste_payload] previous paste ended {}ms ago, skipping to prevent burst",
                     t.elapsed().as_millis()
                 );
                 return Ok(());
@@ -25,37 +177,98 @@ pub fn paste_content(content: String, app: &tauri::AppHandle) -> Result<(), Stri
         }
     }
 
-    let mut cb = Clipboard::new().map_err(|e| {
-        log::error!("[paste_content] clipboard open failed: {}", e);
-        format!("Failed to open clipboard: {}", e)
-    })?;
+    // Snapshot the user's current clipboard before we touch it so we can
+    // restore it after the target app has finished consuming the paste.
+    let original = snapshot_clipboard();
+    let original_fp = fingerprint_of_snapshot(&original);
+    let original_is_empty = matches!(original, ClipboardSnapshot::Empty);
 
-    let original = cb.get_text().ok();
+    // Place the payload onto the clipboard. Track the fingerprint we just
+    // produced so the monitor thread doesn't immediately bounce this back
+    // as a brand-new history entry.
+    let pasted_fp = match payload.item_type {
+        ItemType::Text => {
+            let text = payload
+                .content
+                .ok_or_else(|| "Text item has empty content".to_string())?;
+            set_clipboard_text(text)?;
+            fingerprint_text(text)
+        }
+        ItemType::Richtext => {
+            let text = payload
+                .content
+                .ok_or_else(|| "Rich-text item has no plain-text fallback".to_string())?;
+            let html = payload.rich_text.unwrap_or(text);
+            set_clipboard_html(html, text)?;
+            fingerprint_text(html)
+        }
+        ItemType::Image => {
+            let bytes = payload
+                .image_data
+                .ok_or_else(|| "Image item has no pixel data".to_string())?;
+            if bytes.is_empty() {
+                return Err("Image item has empty pixel data".into());
+            }
+            let mime = payload.image_mime.unwrap_or("image/png");
+            set_clipboard_image(bytes, mime)?;
+            fingerprint_bytes(bytes)
+        }
+        ItemType::Files => {
+            let paths = payload
+                .file_paths
+                .ok_or_else(|| "File item has no paths".to_string())?;
+            if paths.is_empty() {
+                return Err("File item has empty path list".into());
+            }
+            let joined = paths.join("\n");
+            set_clipboard_files(paths)?;
+            fingerprint_text(&joined)
+        }
+    };
+    set_last_fingerprint(app, pasted_fp);
 
-    cb.set_text(&content).map_err(|e| {
-        log::error!("[paste_content] clipboard set_text failed: {}", e);
-        format!("Failed to set clipboard text: {}", e)
-    })?;
-    drop(cb);
-
-    log::info!("[paste_content] clipboard set OK, dispatching paste");
+    log::info!("[paste_payload] clipboard set OK, dispatching paste");
     do_paste(app)?;
 
-    if let Some(orig) = original {
-        thread::sleep(Duration::from_millis(300));
-        let mut cb = Clipboard::new().map_err(|e| {
-            log::error!("[paste_content] clipboard reopen failed: {}", e);
-            format!("Failed to open clipboard: {}", e)
-        })?;
-        let _ = cb.set_text(&orig);
+    // Give the target app time to consume the clipboard BEFORE we restore
+    // the original. 300ms is enough for the Cmd+V keystroke to traverse
+    // the event pipeline, the target app to issue its NSPasteboard read,
+    // and the read to complete — even on slower editors. If the snapshot
+    // was empty we still want a short pause so the paste registers before
+    // any subsequent poll of the clipboard.
+    thread::sleep(Duration::from_millis(300));
+
+    if !original_is_empty {
+        restore_snapshot(original);
+        set_last_fingerprint(app, original_fp);
     }
 
     if let Ok(mut last) = PASTE_LAST_END.lock() {
         *last = Some(Instant::now());
     }
 
-    log::info!("[paste_content] done");
+    log::info!("[paste_payload] done");
     Ok(())
+}
+
+// Convenience wrapper for the common case where the caller only has a
+// plain-text string. Routes through `paste_payload` so all the snapshot /
+// fingerprint / type-routing logic stays in one place. Kept available so
+// future commands (e.g. a "copy as plain text" action) can reuse it
+// without re-implementing the snapshot dance.
+#[allow(dead_code)]
+pub fn paste_text(text: &str, app: &tauri::AppHandle) -> Result<(), String> {
+    paste_payload(
+        PastePayload {
+            item_type: ItemType::Text,
+            content: Some(text),
+            rich_text: None,
+            file_paths: None,
+            image_data: None,
+            image_mime: None,
+        },
+        app,
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -108,7 +321,7 @@ pub fn save_frontmost_app(app: &tauri::AppHandle) {
             return;
         }
         log::info!("[paste] saved frontmost: bundle={} pid={}", bundle_id, pid);
-        if let Some(state) = app.try_state::<crate::state::AppState>() {
+        if let Some(state) = app.try_state::<AppState>() {
             if let Ok(mut b) = state.previous_app_bundle_id.lock() {
                 *b = Some(bundle_id);
             }
@@ -296,9 +509,20 @@ mod macos {
     }
 
     pub fn do_paste(app: &tauri::AppHandle) -> Result<(), String> {
-        if !is_accessibility_trusted() {
+        // The accessibility permission check below is purely diagnostic —
+        // CGEventPost will silently fail if the app isn't trusted. Logging
+        // the result lets users diagnose "paste does nothing" without
+        // having to attach a debugger. They still need to grant BOTH:
+        //   System Settings -> Privacy & Security -> Accessibility
+        //   System Settings -> Privacy & Security -> Input Monitoring
+        // on macOS Catalina and later. We don't request either here because
+        // macOS shows those prompts only when an actual CGEvent is posted
+        // to another process; surfacing them proactively is a UI change
+        // for another day.
+        let trusted = is_accessibility_trusted();
+        if !trusted {
             log::warn!(
-                "[paste] Accessibility NOT granted. Grant in System Settings -> Privacy & Security -> Accessibility, then restart."
+                "[paste] Accessibility NOT granted. Grant in System Settings -> Privacy & Security -> Accessibility AND Input Monitoring, then restart the app."
             );
         } else {
             log::info!("[paste] Accessibility OK");
@@ -316,6 +540,15 @@ mod macos {
             saved_pid
         );
 
+        // Order matters:
+        //   1. release app-level focus so the next activate is honored
+        //   2. short pause for the window server to process the release
+        //   3. activate the previously frontmost app (saved at hotkey time)
+        //   4. longer pause so the target's main run loop becomes key
+        //   5. post Cmd+V via HID — target app reads NSPasteboard
+        // On the macOS window server, activations take ~80–150ms to
+        // propagate to the foreground process; we sleep generously so the
+        // keystroke isn't lost to a stale focus state.
         log::info!("[paste] deactivating self...");
         deactivate_self();
         thread::sleep(Duration::from_millis(80));
@@ -355,9 +588,24 @@ mod macos {
             }
         }
 
-        thread::sleep(Duration::from_millis(200));
+        // 250ms (was 200ms) lets the activation settle before we post the
+        // keystroke. macOS sometimes needs >200ms on slow disks or when
+        // the target is the first process to become foreground after a
+        // long idle period.
+        thread::sleep(Duration::from_millis(250));
 
         log::info!("[paste] posting Cmd+V via CGEventPost...");
+        if !trusted {
+            // Surface the most likely failure mode to the operator instead
+            // of swallowing it — pasting into other apps is impossible
+            // without this permission on macOS.
+            return Err(
+                "Accessibility permission is required to paste into other apps. \
+                 Open System Settings -> Privacy & Security -> Accessibility and \
+                 Input Monitoring, grant SunSaltyBoard, then restart the app."
+                    .into(),
+            );
+        }
         send_paste_keystroke()?;
         log::info!("[paste] dispatched keystroke to: {}", activated_name);
         Ok(())
@@ -391,7 +639,7 @@ mod macos {
 pub fn check_accessibility_and_log() {
     if !macos::is_accessibility_trusted() {
         log::warn!(
-            "[startup] macOS Accessibility NOT granted. Pasting into other apps will NOT work until granted in System Settings -> Privacy & Security -> Accessibility."
+            "[startup] macOS Accessibility NOT granted. Pasting into other apps will NOT work until granted in System Settings -> Privacy & Security -> Accessibility AND Input Monitoring."
         );
     } else {
         log::info!("[startup] macOS Accessibility granted.");

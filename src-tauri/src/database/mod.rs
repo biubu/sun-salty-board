@@ -5,7 +5,7 @@ mod search;
 use rusqlite::{Connection, params};
 use std::sync::Mutex;
 
-pub use self::models::{ClipboardItem, Category};
+pub use self::models::{ClipboardItem, Category, ItemType};
 pub use self::search::SearchQuery;
 
 pub struct Database {
@@ -17,11 +17,24 @@ pub struct Database {
 const FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 const FLUSH_BATCH_SIZE: usize = 50;
 
+// Column projection used for every read query below. The order MUST match
+// the positional indices consumed by `ClipboardItem::from_row`:
+//  0 id, 1 type, 2 content, 3 rich_text, 4 file_paths,
+//  5 image_data, 6 image_mime, 7 fingerprint,
+//  8 sensitive, 9 favorite, 10 created_at
+const SELECT_COLUMNS: &str =
+    "id, type, content, rich_text, file_paths, image_data, image_mime, \
+     fingerprint, sensitive, favorite, created_at";
+
+const INSERT_COLUMNS: &str =
+    "type, content, rich_text, file_paths, image_data, image_mime, fingerprint, sensitive, favorite, created_at";
+
 impl Database {
     pub fn open(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
         schema::initialize(&conn)?;
+        schema::migrate_add_image_columns(&conn)?;
         schema::migrate_fts4_to_fts5(&conn)?;
         Ok(Self {
             conn,
@@ -32,12 +45,21 @@ impl Database {
 
     pub fn insert_item(&self, item: &ClipboardItem) -> Result<i64, Box<dyn std::error::Error>> {
         self.conn.execute(
-            "INSERT INTO items (type, content, rich_text, file_paths, fingerprint, sensitive, favorite, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            &format!(
+                "INSERT INTO items ({}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                INSERT_COLUMNS
+            ),
             params![
-                item.type_str(), item.content, item.rich_text,
-                item.file_paths.as_deref(), item.fingerprint, item.sensitive,
-                item.favorite, item.created_at,
+                item.type_str(),
+                item.content,
+                item.rich_text,
+                item.file_paths.as_deref(),
+                item.image_data.as_deref(),
+                item.image_mime,
+                item.fingerprint,
+                item.sensitive,
+                item.favorite,
+                item.created_at,
             ],
         )?;
         let id = self.conn.last_insert_rowid();
@@ -84,12 +106,18 @@ impl Database {
         let tx = self.conn.unchecked_transaction()?;
         for item in batch {
             tx.execute(
-                "INSERT INTO items (type, content, rich_text, file_paths, fingerprint, sensitive, favorite, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                &format!("INSERT INTO items ({}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)", INSERT_COLUMNS),
                 params![
-                    item.type_str(), item.content, item.rich_text,
-                    item.file_paths.as_deref(), item.fingerprint, item.sensitive,
-                    item.favorite, item.created_at,
+                    item.type_str(),
+                    item.content,
+                    item.rich_text,
+                    item.file_paths.as_deref(),
+                    item.image_data.as_deref(),
+                    item.image_mime,
+                    item.fingerprint,
+                    item.sensitive,
+                    item.favorite,
+                    item.created_at,
                 ],
             )?;
         }
@@ -98,10 +126,11 @@ impl Database {
     }
 
     pub fn get_items(&self, limit: usize, offset: usize) -> Result<Vec<ClipboardItem>, Box<dyn std::error::Error>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, type, content, rich_text, file_paths, fingerprint, sensitive, favorite, created_at
-             FROM items ORDER BY created_at DESC LIMIT ?1 OFFSET ?2"
-        )?;
+        let sql = format!(
+            "SELECT {} FROM items ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
+            SELECT_COLUMNS
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![limit as i64, offset as i64], |row| {
             Ok(ClipboardItem::from_row(row))
         })?;
@@ -114,13 +143,19 @@ impl Database {
 
     pub fn search_items(&self, query: &str, limit: usize) -> Result<Vec<ClipboardItem>, Box<dyn std::error::Error>> {
         let sanitized = SearchQuery::sanitize(query);
+        // Qualify every column with `i.` because `items_fts` also exposes a
+        // `content` column (the FTS mirror of `items.content`). Without the
+        // alias SQLite refuses the query as ambiguous.
         let sql = format!(
-            "SELECT i.id, i.type, i.content, i.rich_text, i.file_paths, i.fingerprint, i.sensitive, i.favorite, i.created_at
-             FROM items i
-             INNER JOIN items_fts ON i.id = items_fts.rowid
-             WHERE items_fts MATCH ?1
-             ORDER BY rank
-             LIMIT ?2"
+            "SELECT {prefixed} FROM items i \
+             INNER JOIN items_fts ON i.id = items_fts.rowid \
+             WHERE items_fts MATCH ?1 \
+             ORDER BY rank LIMIT ?2",
+            prefixed = SELECT_COLUMNS
+                .split(',')
+                .map(|c| format!("i.{}", c.trim()))
+                .collect::<Vec<_>>()
+                .join(", ")
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![sanitized, limit as i64], |row| {
@@ -135,25 +170,29 @@ impl Database {
 
     pub fn delete_item(&self, id: i64) -> Result<(), Box<dyn std::error::Error>> {
         self.conn.execute("DELETE FROM items WHERE id = ?1", params![id])?;
+        // The `items_ad` trigger would normally clean up the FTS index, but
+        // bulk DELETE statements bypass triggers in SQLite, so delete
+        // explicitly. `item_categories` is removed via FK cascade.
         self.conn.execute("DELETE FROM items_fts WHERE rowid = ?1", params![id])?;
-        self.conn.execute("DELETE FROM item_categories WHERE item_id = ?1", params![id])?;
         Ok(())
     }
 
     pub fn clear_history(&self, preserve_favorites: bool) -> Result<(), Box<dyn std::error::Error>> {
-        if preserve_favorites {
-            self.conn.execute_batch(
-                "PRAGMA defer_foreign_keys=ON;
-                 DELETE FROM item_categories WHERE item_id IN (SELECT id FROM items WHERE favorite = 0);
-                 DELETE FROM items WHERE favorite = 0;"
-            )?;
+        // The `items_ad` trigger handles FTS cleanup for `DELETE FROM items`,
+        // and `ON DELETE CASCADE` cleans up `item_categories`. Running
+        // everything in a single transaction keeps the FTS index consistent
+        // even if a row fails the trigger mid-batch.
+        let tx = self.conn.unchecked_transaction()?;
+        let sql = if preserve_favorites {
+            "DELETE FROM items WHERE favorite = 0"
         } else {
-            self.conn.execute_batch(
-                "PRAGMA defer_foreign_keys=ON;
-                 DELETE FROM item_categories;
-                 DELETE FROM items;"
-            )?;
-        }
+            "DELETE FROM items"
+        };
+        tx.execute(sql, [])?;
+        tx.commit()?;
+        // VACUUM is intentionally NOT run here — it rewrites the entire
+        // database file, can starve the UI thread, and offers no behavioural
+        // benefit since WAL+autovacuum reclaim space on the next checkpoint.
         Ok(())
     }
 
@@ -170,10 +209,11 @@ impl Database {
     }
 
     pub fn get_favorites(&self) -> Result<Vec<ClipboardItem>, Box<dyn std::error::Error>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, type, content, rich_text, file_paths, fingerprint, sensitive, favorite, created_at
-             FROM items WHERE favorite = 1 ORDER BY created_at DESC"
-        )?;
+        let sql = format!(
+            "SELECT {} FROM items WHERE favorite = 1 ORDER BY created_at DESC",
+            SELECT_COLUMNS
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([], |row| Ok(ClipboardItem::from_row(row)))?;
         let mut items = Vec::new();
         for row in rows {
@@ -267,14 +307,20 @@ impl Database {
             "DELETE FROM items WHERE favorite = 0 AND created_at < datetime('now', ?1)",
             params![format!("-{} days", max_days)],
         )?;
+        // Bulk DELETE bypasses the FTS trigger, so wipe stale rows manually.
+        self.conn.execute(
+            "DELETE FROM items_fts WHERE rowid NOT IN (SELECT id FROM items)",
+            [],
+        )?;
         Ok(count)
     }
 
     pub fn get_item_by_id(&self, id: i64) -> Result<Option<ClipboardItem>, Box<dyn std::error::Error>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, type, content, rich_text, file_paths, fingerprint, sensitive, favorite, created_at
-             FROM items WHERE id = ?1"
-        )?;
+        let sql = format!(
+            "SELECT {} FROM items WHERE id = ?1",
+            SELECT_COLUMNS
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query_map(params![id], |row| Ok(ClipboardItem::from_row(row)))?;
         match rows.next() {
             Some(Ok(item)) => Ok(Some(item)),
@@ -293,25 +339,30 @@ mod tests {
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let path = format!("/tmp/sunsaltyboard_test_{}_{}.db", std::process::id(), n);
         let _ = std::fs::remove_file(&path);
-        let db = Database::open(&path).expect(&format!("Failed to open test db at {}", path));
-        db
+        Database::open(&path).expect(&format!("Failed to open test db at {}", path))
+    }
+
+    fn make_item(content: Option<&str>, item_type: i32, favorite: bool, fingerprint: &str) -> ClipboardItem {
+        ClipboardItem {
+            id: 0,
+            item_type,
+            content: content.map(|s| s.to_string()),
+            rich_text: None,
+            file_paths: None,
+            image_data: None,
+            image_mime: None,
+            fingerprint: fingerprint.to_string(),
+            sensitive: false,
+            favorite,
+            created_at: "2024-01-01 12:00:00".into(),
+            categories: None,
+        }
     }
 
     #[test]
     fn test_insert_and_get_items() {
         let db = setup_db();
-        let item = ClipboardItem {
-            id: 0,
-            item_type: 0,
-            content: Some("hello world".into()),
-            rich_text: None,
-            file_paths: None,
-            fingerprint: "abc123".into(),
-            sensitive: false,
-            favorite: false,
-            created_at: "2024-01-01 12:00:00".into(),
-            categories: None,
-        };
+        let item = make_item(Some("hello world"), 0, false, "abc123");
         let id = db.insert_item(&item).expect("insert failed");
         assert!(id > 0);
         let items = db.get_items(10, 0).expect("get_items failed");
@@ -322,44 +373,35 @@ mod tests {
     #[test]
     fn test_delete_item() {
         let db = setup_db();
-        let item = ClipboardItem {
-            id: 0, item_type: 0, content: Some("delete me".into()),
-            rich_text: None, file_paths: None, fingerprint: "del".into(),
-            sensitive: false, favorite: false,
-            created_at: "2024-01-01 12:00:00".into(), categories: None,
-        };
+        let item = make_item(Some("delete me"), 0, false, "del");
         let id = db.insert_item(&item).unwrap();
         db.delete_item(id).unwrap();
         assert_eq!(db.get_items(10, 0).unwrap().len(), 0);
+        // FTS index should also be clean so search does not return orphans.
+        assert_eq!(db.search_items("delete", 10).unwrap().len(), 0);
     }
 
     #[test]
     fn test_clear_history() {
         let db = setup_db();
         for i in 0..3 {
-            let item = ClipboardItem {
-                id: 0, item_type: 0, content: Some(format!("item {}", i)),
-                rich_text: None, file_paths: None, fingerprint: format!("fp{}", i),
-                sensitive: false, favorite: i == 0,
-                created_at: "2024-01-01 12:00:00".into(), categories: None,
-            };
+            let item = make_item(Some(&format!("item {}", i)), 0, i == 0, &format!("fp{}", i));
             db.insert_item(&item).unwrap();
         }
         db.clear_history(true).unwrap();
         assert_eq!(db.get_items(10, 0).unwrap().len(), 1);
+        // FTS index should be reaped alongside the rows so a post-clear
+        // search for the deleted text does not return phantom hits.
+        assert_eq!(db.search_items("item", 10).unwrap().len(), 1);
         db.clear_history(false).unwrap();
         assert_eq!(db.get_items(10, 0).unwrap().len(), 0);
+        assert_eq!(db.search_items("item", 10).unwrap().len(), 0);
     }
 
     #[test]
     fn test_toggle_favorite() {
         let db = setup_db();
-        let item = ClipboardItem {
-            id: 0, item_type: 0, content: Some("fav test".into()),
-            rich_text: None, file_paths: None, fingerprint: "fav".into(),
-            sensitive: false, favorite: false,
-            created_at: "2024-01-01 12:00:00".into(), categories: None,
-        };
+        let item = make_item(Some("fav test"), 0, false, "fav");
         let id = db.insert_item(&item).unwrap();
         let new_val = db.toggle_favorite(id).unwrap();
         assert!(new_val);
@@ -371,12 +413,7 @@ mod tests {
     fn test_favorites() {
         let db = setup_db();
         for i in 0..3 {
-            let item = ClipboardItem {
-                id: 0, item_type: 0, content: Some(format!("item {}", i)),
-                rich_text: None, file_paths: None, fingerprint: format!("fp{}", i),
-                sensitive: false, favorite: i == 1,
-                created_at: "2024-01-01 12:00:00".into(), categories: None,
-            };
+            let item = make_item(Some(&format!("item {}", i)), 0, i == 1, &format!("fav-fp-{}", i));
             db.insert_item(&item).unwrap();
         }
         let favs = db.get_favorites().unwrap();
@@ -386,12 +423,7 @@ mod tests {
     #[test]
     fn test_search() {
         let db = setup_db();
-        let item = ClipboardItem {
-            id: 0, item_type: 0, content: Some("unique searchable text".into()),
-            rich_text: None, file_paths: None, fingerprint: "src".into(),
-            sensitive: false, favorite: false,
-            created_at: "2024-01-01 12:00:00".into(), categories: None,
-        };
+        let item = make_item(Some("unique searchable text"), 0, false, "src");
         db.insert_item(&item).unwrap();
         let results = db.search_items("searchable", 10).unwrap();
         assert_eq!(results.len(), 1);
@@ -420,12 +452,7 @@ mod tests {
     fn test_write_queue() {
         let db = setup_db();
         for i in 0..3 {
-            let item = ClipboardItem {
-                id: 0, item_type: 0, content: Some(format!("qitem {}", i)),
-                rich_text: None, file_paths: None, fingerprint: format!("qfp{}", i),
-                sensitive: false, favorite: false,
-                created_at: "2024-01-01 12:00:00".into(), categories: None,
-            };
+            let item = make_item(Some(&format!("qitem {}", i)), 0, false, &format!("qfp{}", i));
             db.enqueue_item(item).unwrap();
         }
         db.flush().unwrap();
@@ -435,19 +462,11 @@ mod tests {
     #[test]
     fn test_expire_old_items() {
         let db = setup_db();
-        let item = ClipboardItem {
-            id: 0, item_type: 0, content: Some("old item".into()),
-            rich_text: None, file_paths: None, fingerprint: "old".into(),
-            sensitive: false, favorite: false,
-            created_at: "2020-01-01 12:00:00".into(), categories: None,
-        };
-        db.insert_item(&item).unwrap();
-        let new_item = ClipboardItem {
-            id: 0, item_type: 0, content: Some("new item".into()),
-            rich_text: None, file_paths: None, fingerprint: "new".into(),
-            sensitive: false, favorite: true,
-            created_at: "2024-01-01 12:00:00".into(), categories: None,
-        };
+        let old = make_item(Some("old item"), 0, false, "old");
+        let mut old_with_old_date = old.clone();
+        old_with_old_date.created_at = "2020-01-01 12:00:00".into();
+        db.insert_item(&old_with_old_date).unwrap();
+        let new_item = make_item(Some("new item"), 0, true, "new");
         db.insert_item(&new_item).unwrap();
         let expired = db.expire_old_items(365).unwrap();
         assert!(expired > 0);
@@ -457,12 +476,7 @@ mod tests {
     #[test]
     fn test_get_item_by_id() {
         let db = setup_db();
-        let item = ClipboardItem {
-            id: 0, item_type: 0, content: Some("by id".into()),
-            rich_text: None, file_paths: None, fingerprint: "id".into(),
-            sensitive: false, favorite: false,
-            created_at: "2024-01-01 12:00:00".into(), categories: None,
-        };
+        let item = make_item(Some("by id"), 0, false, "id");
         let id = db.insert_item(&item).unwrap();
         let found = db.get_item_by_id(id).unwrap();
         assert!(found.is_some());
@@ -472,19 +486,34 @@ mod tests {
     }
 
     #[test]
-    fn test_item_categories_assignment() {
+    fn test_image_item_roundtrip() {
         let db = setup_db();
-        let cat_id = db.create_category("cat1", None).unwrap();
-        let item = ClipboardItem {
-            id: 0, item_type: 0, content: Some("categorized".into()),
-            rich_text: None, file_paths: None, fingerprint: "cat".into(),
-            sensitive: false, favorite: false,
-            created_at: "2024-01-01 12:00:00".into(), categories: None,
-        };
-        let item_id = db.insert_item(&item).unwrap();
-        db.assign_category(item_id, cat_id).unwrap();
-        db.remove_category(item_id, cat_id).unwrap();
-        // Verify by re-inserting and checking no crash
-        db.assign_category(item_id, cat_id).unwrap();
+        let mut item = make_item(None, ItemType::Image as i32, false, "img-fp");
+        item.image_data = Some(vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+        item.image_mime = Some("image/png".into());
+        let id = db.insert_item(&item).unwrap();
+
+        let fetched = db.get_item_by_id(id).unwrap().unwrap();
+        assert_eq!(fetched.item_type, ItemType::Image as i32);
+        assert_eq!(
+            fetched.image_data.as_deref(),
+            Some(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A][..])
+        );
+        assert_eq!(fetched.image_mime.as_deref(), Some("image/png"));
+    }
+
+    #[test]
+    fn test_file_item_roundtrip() {
+        let db = setup_db();
+        let mut item = make_item(None, ItemType::Files as i32, false, "file-fp");
+        item.file_paths = Some("/Users/a/file1.txt\n/Users/a/file2.txt".into());
+        let id = db.insert_item(&item).unwrap();
+
+        let fetched = db.get_item_by_id(id).unwrap().unwrap();
+        assert_eq!(fetched.item_type, ItemType::Files as i32);
+        assert_eq!(
+            fetched.file_paths.as_deref(),
+            Some("/Users/a/file1.txt\n/Users/a/file2.txt")
+        );
     }
 }

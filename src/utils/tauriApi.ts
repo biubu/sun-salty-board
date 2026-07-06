@@ -3,17 +3,26 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import type { ClipboardItem, Category, Settings, SensitiveItem } from '../types/clipboard'
 
 function mapItem(raw: any): ClipboardItem {
+  // The Rust side serialises `image_data` as a `Vec<u8>` which the IPC
+  // channel deserialises into a plain JS array of numbers. Front-end code
+  // expects a Uint8Array so it can hand the buffer to `Blob` directly.
+  let imageData: Uint8Array | undefined
+  if (raw.image_data && Array.isArray(raw.image_data)) {
+    imageData = new Uint8Array(raw.image_data)
+  }
   return {
     id: raw.id,
     content: raw.content || '',
     contentHtml: raw.rich_text || undefined,
     dataType: ['text', 'richtext', 'image', 'files'][raw.type] as any,
-    filePaths: raw.file_paths ? raw.file_paths.split('\n').filter(Boolean) : undefined,
+    filePaths: raw.file_paths
+      ? raw.file_paths.split('\n').filter(Boolean)
+      : undefined,
+    imageData,
+    imageMime: raw.image_mime || undefined,
     categoryIds: raw.categories || [],
     isFavorite: raw.favorite,
     createdAt: raw.created_at,
-    imageData: undefined,
-    imageMime: undefined,
   }
 }
 
@@ -109,7 +118,7 @@ export function removeCategory(itemId: number, categoryId: number) {
 }
 
 export function clearHistory() {
-  invoke('clear_history', { preserveFavorites: true })
+  return invoke<void>('clear_history', { preserveFavorites: true })
 }
 
 export async function getSettings(): Promise<Settings> {
@@ -146,6 +155,17 @@ export function onHistoryUpdate(callback: (item: ClipboardItem) => void): () => 
   listen<any>('clipboard-changed', (event) => {
     const item = mapItem(event.payload)
     callback(item)
+  }).then(fn => { unsub = fn })
+  return () => { if (unsub) unsub() }
+}
+
+// The Rust `clear_history` command emits this after deleting rows so the UI
+// can drop its in-memory list. Without it, the items state stays populated
+// until the next manual refresh.
+export function onHistoryCleared(callback: () => void): () => void {
+  let unsub: UnlistenFn | undefined
+  listen('history-cleared', () => {
+    callback()
   }).then(fn => { unsub = fn })
   return () => { if (unsub) unsub() }
 }
