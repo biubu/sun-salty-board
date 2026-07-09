@@ -34,13 +34,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Sync version from git tag
-        shell: bash
-        run: |
-          TAG=${GITHUB_REF_NAME#v}
-          pnpm version "$TAG" --no-git-tag-version --allow-same-version
-          sed -i.bak "s/^version = .*/version = \"$TAG\"/" src-tauri/Cargo.toml && rm -f src-tauri/Cargo.toml.bak
-
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -54,6 +47,13 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           run_install: false
+
+      - name: Sync version from git tag
+        shell: bash
+        run: |
+          TAG=${GITHUB_REF_NAME#v}
+          pnpm version "$TAG" --no-git-tag-version --allow-same-version
+          sed -i.bak "s/^version = .*/version = \"$TAG\"/" src-tauri/Cargo.toml && rm -f src-tauri/Cargo.toml.bak
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
