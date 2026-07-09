@@ -71,9 +71,25 @@ pub fn run() {
             let win_clone = win.clone();
             win.on_window_event(move |event| {
                 if let tauri::WindowEvent::Focused(false) = event {
-                    if win_clone.is_visible().unwrap_or(false) {
-                        let _ = win_clone.hide();
-                    }
+                    // Debounce focus-loss auto-hide so native popups opened by
+                    // HTML form widgets (select dropdowns on Linux GTK and
+                    // Windows, color pickers, file inputs) have time to come
+                    // up before we tear the parent window down. Without this
+                    // grace period, clicking a <select> opens the GTK popup,
+                    // which steals focus from the webview, which fires
+                    // Focused(false), which hides the window and destroys
+                    // the popup before the user can pick an option. 150ms
+                    // is well under the typical user "click away" reaction
+                    // time but long enough for the native popup to mount.
+                    let win = win_clone.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(150));
+                        if win.is_visible().unwrap_or(false)
+                            && !win.is_focused().unwrap_or(false)
+                        {
+                            let _ = win.hide();
+                        }
+                    });
                 }
             });
 
