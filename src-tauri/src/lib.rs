@@ -8,7 +8,7 @@ mod state;
 
 use state::AppState;
 use tauri::Manager;
-use tauri_plugin_global_shortcut::{Code, Modifiers, GlobalShortcutExt, ShortcutState};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 #[cfg(target_os = "macos")]
 use tauri::ActivationPolicy;
@@ -22,9 +22,17 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_global_shortcut::Builder::new()
             .with_handler(move |app, shortcut, event| {
-                if event.state == ShortcutState::Pressed
-                    && shortcut.matches(Modifiers::ALT | Modifiers::SHIFT, Code::KeyV)
-                {
+                // The OS only fires the global handler for shortcuts
+                // we've actually registered, so we no longer match
+                // against a hard-coded Alt+Shift+V — `commands::hotkey::
+                // set_hotkey` can rebind the binding and this body still
+                // toggles the overlay correctly.
+                if event.state == ShortcutState::Pressed {
+                    // Reference the `shortcut` argument so the handler
+                    // signature satisfies the plugin without lint
+                    // complaints; the value is unused but documents that
+                    // we receive the matched binding for diagnostics.
+                    let _registered = shortcut;
                     if let Some(window) = app.get_webview_window("main") {
                         if window.is_visible().unwrap_or(false) {
                             let _ = window.hide();
@@ -57,6 +65,11 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let state = AppState::new(app.handle())?;
+            // Capture the hotkey the user has configured (or the
+            // default) before we hand ownership of `state` to Tauri so
+            // we can register the same shortcut at the OS level a few
+            // lines below.
+            let hotkey_to_register = state.current_hotkey.lock().unwrap().clone();
             app.manage(state);
 
             tray::create_tray(app.handle())?;
@@ -114,7 +127,12 @@ pub fn run() {
                 }
             });
 
-            app.global_shortcut().register("Alt+Shift+V")?;
+            if let Err(e) = app.global_shortcut().register(hotkey_to_register.as_str()) {
+                log::warn!(
+                    "[startup] could not register global shortcut '{}': {}. The Settings panel will show how to pick a different one.",
+                    hotkey_to_register, e
+                );
+            }
 
             Ok(())
         })
@@ -144,6 +162,8 @@ pub fn run() {
             commands::app::get_platform,
             commands::app::get_session_type,
             commands::app::log_to_rust,
+            commands::hotkey::set_hotkey,
+            commands::hotkey::get_hotkey,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

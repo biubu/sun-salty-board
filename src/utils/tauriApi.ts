@@ -1,8 +1,23 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import type { ClipboardItem, Category, Settings, SensitiveItem } from '../types/clipboard'
+import type { ClipboardItem, Category, Settings } from '../types/clipboard'
 
-function mapItem(raw: any): ClipboardItem {
+interface RawClipboardItem {
+  id: number
+  type: number
+  content: string | null
+  rich_text?: string | null
+  file_paths?: string | null
+  image_data?: number[] | null
+  image_mime?: string | null
+  categories?: number[] | null
+  favorite: boolean
+  created_at: string
+}
+
+const DATA_TYPES = ['text', 'richtext', 'image', 'files'] as const
+
+function mapItem(raw: RawClipboardItem): ClipboardItem {
   // The Rust side serialises `image_data` as a `Vec<u8>` which the IPC
   // channel deserialises into a plain JS array of numbers. Front-end code
   // expects a Uint8Array so it can hand the buffer to `Blob` directly.
@@ -10,11 +25,12 @@ function mapItem(raw: any): ClipboardItem {
   if (raw.image_data && Array.isArray(raw.image_data)) {
     imageData = new Uint8Array(raw.image_data)
   }
+  const typeIndex = DATA_TYPES[raw.type]
   return {
     id: raw.id,
     content: raw.content || '',
     contentHtml: raw.rich_text || undefined,
-    dataType: ['text', 'richtext', 'image', 'files'][raw.type] as any,
+    dataType: typeIndex ?? 'text',
     filePaths: raw.file_paths
       ? raw.file_paths.split('\n').filter(Boolean)
       : undefined,
@@ -26,17 +42,17 @@ function mapItem(raw: any): ClipboardItem {
   }
 }
 
-function mapItems(raw: any[]): ClipboardItem[] {
+function mapItems(raw: RawClipboardItem[]): ClipboardItem[] {
   return raw.map(mapItem)
 }
 
 export async function getHistory(): Promise<ClipboardItem[]> {
-  const raw = await invoke<unknown[]>('get_items', { limit: 10000, offset: 0 })
+  const raw = await invoke<RawClipboardItem[]>('get_items', { limit: 10000, offset: 0 })
   return mapItems(raw)
 }
 
 export async function searchHistory(query: string): Promise<ClipboardItem[]> {
-  const raw = await invoke<unknown[]>('search_items', { query, limit: 100 })
+  const raw = await invoke<RawClipboardItem[]>('search_items', { query, limit: 100 })
   return mapItems(raw)
 }
 
@@ -82,13 +98,11 @@ export function _resetSessionTypeCacheForTesting() {
 export type BeforeHideHook = () => Promise<void> | void
 
 export async function pasteItem(itemId: number, beforeHide?: BeforeHideHook) {
-  console.log('[pasteItem] called itemId=', itemId)
   if (!Number.isFinite(itemId) || itemId <= 0) {
     console.warn('[pasteItem] ignoring invalid itemId', itemId)
     return
   }
   if (pasteInFlight) {
-    console.log('[pasteItem] already in flight, ignoring duplicate click')
     invoke('log_to_rust', { level: 'warn', msg: `[pasteItem] already in flight, ignoring duplicate click itemId=${itemId}` }).catch(() => {})
     return
   }
@@ -100,7 +114,6 @@ export async function pasteItem(itemId: number, beforeHide?: BeforeHideHook) {
     }
     try {
       await invoke('hide_window')
-      console.log('[pasteItem] window hidden')
     } catch (e) {
       console.error('[pasteItem] hide_window failed:', e)
       throw e
@@ -108,7 +121,6 @@ export async function pasteItem(itemId: number, beforeHide?: BeforeHideHook) {
     await new Promise(r => setTimeout(r, 200))
     try {
       await invoke('paste_item', { itemId })
-      console.log('[pasteItem] paste_item OK')
     } catch (e) {
       console.error('[pasteItem] paste_item failed:', e)
       throw e
@@ -127,7 +139,7 @@ export function deleteItem(id: number) {
 }
 
 export async function undoDelete(): Promise<ClipboardItem | null> {
-  const raw = await invoke<unknown | null>('undo_delete')
+  const raw = await invoke<RawClipboardItem | null>('undo_delete')
   return raw ? mapItem(raw) : null
 }
 
@@ -165,10 +177,20 @@ export function clearHistory() {
 
 export async function getSettings(): Promise<Settings> {
   const raw = await invoke<Record<string, string>>('get_settings')
+  let hotkey = raw.hotkey || ''
+  if (!hotkey) {
+    // The DB hasn't seeded `hotkey` yet (fresh install). Read whatever
+    // the Rust side actually has registered so the UI matches reality.
+    try {
+      hotkey = await invoke<string>('get_hotkey')
+    } catch {
+      hotkey = 'Alt+Shift+V'
+    }
+  }
   return {
     maxItems: parseInt(raw.maxItems || '10000', 10),
-    hotkey: raw.hotkey || 'Alt+Shift+V',
-    expirationDays: parseInt(raw.expirationDays || '365', 10),
+    hotkey,
+    expirationDays: parseInt(raw.expirationDays || '30', 10),
     theme: (raw.theme as 'light' | 'dark') || 'dark',
     locale: raw.locale || 'en',
     exclusionApps: raw.exclusionApps ? raw.exclusionApps.split('\n') : [],
@@ -179,7 +201,17 @@ export async function getSettings(): Promise<Settings> {
 export function updateSettings(settings: Partial<Settings>) {
   Object.entries(settings).forEach(([key, value]) => {
     const v = Array.isArray(value) ? value.join('\n') : String(value)
-    invoke('update_setting', { key, value: v })
+    if (key === 'hotkey') {
+      // Persist AND ask the OS layer to re-register the binding. Doing
+      // only the DB write leaves a stale `Alt+Shift+V` bound at runtime;
+      // doing only the OS call drops the user's choice the next launch.
+      invoke('update_setting', { key, value: v })
+      invoke('set_hotkey', { hotkey: v }).catch((e: unknown) => {
+        console.error('[settings] set_hotkey failed', e)
+      })
+    } else {
+      invoke('update_setting', { key, value: v })
+    }
   })
 }
 
@@ -188,13 +220,9 @@ export async function getStats(): Promise<{ totalItems: number; favoriteItems: n
   return { totalItems: raw.total_items, favoriteItems: raw.favorite_items, dbSize: raw.db_size }
 }
 
-export async function getSensitiveItems(): Promise<SensitiveItem[]> {
-  return []
-}
-
 export function onHistoryUpdate(callback: (item: ClipboardItem) => void): () => void {
   let unsub: UnlistenFn | undefined
-  listen<any>('clipboard-changed', (event) => {
+  listen<RawClipboardItem>('clipboard-changed', (event) => {
     const item = mapItem(event.payload)
     callback(item)
   }).then(fn => { unsub = fn })
@@ -220,33 +248,47 @@ export function onOpenSettings(callback: () => void): () => void {
   return () => { if (unsub) unsub() }
 }
 
-export function onUpdateAvailable(callback: (info: any) => void): () => void {
+export interface UpdateAvailableInfo {
+  version?: string
+  notes?: string
+  pub_date?: string
+  [key: string]: unknown
+}
+
+export interface UpdateProgressInfo {
+  contentLength?: number
+  chunkLength?: number
+  percent?: number
+  [key: string]: unknown
+}
+
+export function onUpdateAvailable(callback: (info: UpdateAvailableInfo) => void): () => void {
   let unsub: UnlistenFn | undefined
-  listen('tauri://update-available', (event) => {
+  listen<UpdateAvailableInfo>('tauri://update-available', (event) => {
     callback(event.payload || {})
   }).then(fn => { unsub = fn })
   return () => { if (unsub) unsub() }
 }
 
-export function onUpdateNotAvailable(callback: (info: any) => void): () => void {
+export function onUpdateNotAvailable(callback: (info: UpdateAvailableInfo) => void): () => void {
   let unsub: UnlistenFn | undefined
-  listen('tauri://update-status', (_event) => {
+  listen<UpdateAvailableInfo>('tauri://update-status', () => {
     callback({})
   }).then(fn => { unsub = fn })
   return () => { if (unsub) unsub() }
 }
 
-export function onUpdateDownloadProgress(callback: (progress: any) => void): () => void {
+export function onUpdateDownloadProgress(callback: (progress: UpdateProgressInfo) => void): () => void {
   let unsub: UnlistenFn | undefined
-  listen('tauri://update-download-progress', (event) => {
+  listen<UpdateProgressInfo>('tauri://update-download-progress', (event) => {
     callback(event.payload || {})
   }).then(fn => { unsub = fn })
   return () => { if (unsub) unsub() }
 }
 
-export function onUpdateDownloaded(callback: (info: any) => void): () => void {
+export function onUpdateDownloaded(callback: (info: UpdateAvailableInfo) => void): () => void {
   let unsub: UnlistenFn | undefined
-  listen('tauri://update-installed', (event) => {
+  listen<UpdateAvailableInfo>('tauri://update-installed', (event) => {
     callback(event.payload || {})
   }).then(fn => { unsub = fn })
   return () => { if (unsub) unsub() }

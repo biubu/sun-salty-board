@@ -4,3 +4,4 @@ pub mod settings;
 pub mod stats;
 pub mod window;
 pub mod app;
+pub mod hotkey;
