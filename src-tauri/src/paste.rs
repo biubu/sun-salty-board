@@ -162,7 +162,7 @@ pub fn paste_payload(payload: PastePayload<'_>, app: &tauri::AppHandle) -> Resul
     );
 
     {
-        let mut last = PASTE_LAST_END.lock().map_err(|e| {
+        let last = PASTE_LAST_END.lock().map_err(|e| {
             log::error!("[paste_payload] guard lock failed: {}", e);
             format!("guard poisoned: {}", e)
         })?;
@@ -228,7 +228,12 @@ pub fn paste_payload(payload: PastePayload<'_>, app: &tauri::AppHandle) -> Resul
     set_last_fingerprint(app, pasted_fp);
 
     log::info!("[paste_payload] clipboard set OK, dispatching paste");
-    do_paste(app)?;
+    // Capture the keystroke result but don't bail early — we still owe
+    // the caller a clipboard restore even when accessibility/missing
+    // permissions/aborted xdotool made the synthetic paste fail. Without
+    // this guard the user loses their original clipboard content for no
+    // good reason.
+    let paste_result = do_paste(app);
 
     // Give the target app time to consume the clipboard BEFORE we restore
     // the original. 300ms is enough for the Cmd+V keystroke to traverse
@@ -248,7 +253,7 @@ pub fn paste_payload(payload: PastePayload<'_>, app: &tauri::AppHandle) -> Resul
     }
 
     log::info!("[paste_payload] done");
-    Ok(())
+    paste_result
 }
 
 // Convenience wrapper for the common case where the caller only has a
@@ -365,6 +370,12 @@ mod macos {
     const KEY_V: u16 = 9;
     const ACTIVATE_ALL_WINDOWS: u64 = 1;
     const ACTIVATE_IGNORING_OTHER: u64 = 2;
+    // NSApplicationActivationPolicyRegular from AppKit. The Cocoa
+    // constants are only available via the (deprecated) `cocoa` crate, so
+    // mirror the value here and reference it symbolically at the call
+    // sites to avoid the magic-number warning while we wait on the
+    // objc2 migration.
+    const NS_APP_ACTIVATION_POLICY_REGULAR: isize = 0;
 
     #[link(name = "ApplicationServices", kind = "framework")]
     extern "C" {
@@ -491,7 +502,7 @@ mod macos {
                     continue;
                 }
                 let policy: isize = msg_send![app, activationPolicy];
-                if policy != 0 {
+                if policy != NS_APP_ACTIVATION_POLICY_REGULAR {
                     continue;
                 }
                 let is_hidden: BOOL = msg_send![app, isHidden];
@@ -506,7 +517,6 @@ mod macos {
     }
 
     fn activate_app(app: cocoa::base::id) -> bool {
-        use cocoa::base::id;
         use objc::{msg_send, sel, sel_impl};
         unsafe {
             let ok: bool = msg_send![app, activateWithOptions: ACTIVATE_IGNORING_OTHER];
