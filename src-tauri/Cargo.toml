@@ -1,6 +1,6 @@
 [package]
 name = "sunsaltyboard"
-version = "3.2.2"
+version = "3.3.0"
 description = "Cross-platform clipboard manager with high-capacity history"
 authors = ["biubu"]
 license = "MIT"
