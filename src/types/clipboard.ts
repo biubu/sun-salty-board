@@ -8,8 +8,6 @@ export interface ClipboardItem {
   imageData?: Uint8Array | number[]
   imageMime?: string
   filePaths?: string[]
-  sourceApp?: string
-  sourceDevice?: string
   categoryIds: number[]
   isFavorite: boolean
   createdAt: string
@@ -28,11 +26,4 @@ export interface Settings {
   locale: string
   exclusionApps: string[]
   exclusionPatterns: string[]
-}
-
-export interface SensitiveItem {
-  id: number
-  content: string
-  dataType: string
-  capturedAt: number
 }

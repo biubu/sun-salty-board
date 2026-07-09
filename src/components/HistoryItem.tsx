@@ -111,9 +111,6 @@ export default function HistoryItem({ item, isActive, onSelect, onDelete, onTogg
         <div className="history-item-meta">
           <span className="history-item-type">{typeLabel}</span>
           <span className="history-item-time">{formatTime(item.createdAt)}</span>
-          {item.sourceDevice && (
-            <span className="history-item-type">from {item.sourceDevice}</span>
-          )}
         </div>
       </div>
       <div className="history-item-actions">

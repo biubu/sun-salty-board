@@ -2,7 +2,7 @@
 
 A cross-platform clipboard manager for **macOS**, **Windows** and **Linux**, built with Tauri v2 + React. Holds 10,000+ entries of clipboard history with FTS5 full-text search, undo manager, file detection, and tray-first UX.
 
-Latest release: **v3.0.0**
+Latest release: **v3.2.2**
 
 ## Highlights
 

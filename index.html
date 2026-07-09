@@ -6,15 +6,16 @@
     <!--
       Content-Security-Policy
       ─────────────────────────────────────────────────────────────────────
-      * default-src 'self' — only same-origin resources by default.
-      * script-src: 'self' (production); dev adds 'unsafe-eval' and ws://*
-        because Vite's HMR runs ESM with eval + WebSocket reloads on
-        localhost. Relaxing only in dev keeps production hardened.
+      * Dev policy (what you see here): needs 'unsafe-eval' and
+        ws://localhost:* http://localhost:* connect-src because Vite's
+        HMR client runs ESM with eval + WebSocket reloads.
+      * Production policy: vite.config.ts' `csp-prod` plugin strips
+        those relaxations so the shipped bundle only allows 'self'
+        scripts and connection targets.
       * style-src 'unsafe-inline' — inline style attributes are set by
         react-window's FixedSizeList rows for absolute positioning.
       * img-src includes blob: to allow the in-memory image previews
-        produced via URL.createObjectURL (no external network requests).
-      * connect-src mirrors what Vite needs for HMR in dev.
+        produced via URL.createObjectURL.
     -->
     <meta
       http-equiv="Content-Security-Policy"
