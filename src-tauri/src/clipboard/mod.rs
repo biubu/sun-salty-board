@@ -5,9 +5,19 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::database::{ClipboardItem, ItemType};
 use crate::state::AppState;
 
+#[derive(Clone)]
+enum ExclusionRule {
+    // Regex matched against the captured text content.
+    Content(String),
+    // Regex matched against the frontmost app's bundle identifier (macOS)
+    // or window title (Linux X11 / Windows). On platforms without a
+    // frontmost-app probe the field is `None` and App rules are skipped.
+    App(String),
+}
+
 struct ClipboardState {
     last_capture_time: Instant,
-    exclusion_rules: Vec<(String, String)>,
+    exclusion_rules: Vec<ExclusionRule>,
     sensitive_mode: bool,
 }
 
@@ -33,23 +43,119 @@ fn compute_fingerprint_bytes(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+// Pull user-configured exclusion lists out of the `settings` table and
+// rebuild the in-memory rule vectors. Called at startup and again every
+// 30s from the polling loop so updates made via the Settings overlay take
+// effect without a restart.
 fn load_exclusion_rules(app: &AppHandle, clip_state: &mut ClipboardState) {
+    let mut new_rules: Vec<ExclusionRule> = Vec::new();
     if let Some(state) = app.try_state::<AppState>() {
         if let Ok(db) = state.db.lock() {
             if let Ok(mut stmt) = db.conn().prepare(
-                "SELECT value FROM settings WHERE key = 'exclusionPatterns'"
+                "SELECT key, value FROM settings WHERE key IN ('exclusionPatterns', 'exclusionApps')"
             ) {
-                if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
-                    for row in rows.flatten() {
-                        clip_state.exclusion_rules = row
-                            .split('\n')
-                            .filter(|p| !p.is_empty())
-                            .map(|p| (String::new(), p.to_string()))
-                            .collect();
+                if let Ok(mut rows) = stmt.query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                }) {
+                    while let Some(row) = rows.next().transpose().ok().flatten() {
+                        let (key, value) = row;
+                        let kind = match key.as_str() {
+                            "exclusionApps" => ExclusionRule::App,
+                            _ => ExclusionRule::Content,
+                        };
+                        for pattern in value.lines().filter(|p| !p.is_empty()) {
+                            new_rules.push(kind(pattern.to_string()));
+                        }
                     }
                 }
             }
         }
+    }
+    clip_state.exclusion_rules = new_rules;
+}
+
+// Probe the OS for the frontmost app's identifying string. Returns
+// * `Some(bundle_id)` on macOS (NSWorkspace bundleIdentifier);
+// * `Some(window_title)` on Linux X11 (xdotool active window name);
+// * `Some(process_name)` on Windows (PowerShell foreground process name);
+// * `None` everywhere else (e.g. Wayland, where the compositor refuses
+//   to expose the focused surface to non-virtual-keyboard clients).
+//
+// App-level exclusion rules are skipped when this returns None rather
+// than silently dropping them — the user can still see what's configured
+// in Settings and the bug surface stays confined to a log line.
+fn frontmost_app_id() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        use cocoa::base::{id, nil};
+        use objc::{class, msg_send, sel, sel_impl};
+        unsafe {
+            let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+            if workspace == nil {
+                return None;
+            }
+            let app: id = msg_send![workspace, frontmostApplication];
+            if app == nil {
+                return None;
+            }
+            let bid: id = msg_send![app, bundleIdentifier];
+            if bid == nil {
+                return None;
+            }
+            let utf8: *const i8 = msg_send![bid, UTF8String];
+            if utf8.is_null() {
+                return None;
+            }
+            Some(std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned())
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Fall back to the executable name of the foreground window's
+        // owning process — precise enough to match against user-typed
+        // patterns like "1Password.exe" or "KeePass.exe". Falls through
+        // with `None` if no window has a real MainWindowHandle (e.g.
+        // headless console), which is the correct behaviour for an App
+        // rule we can't evaluate.
+        let output = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -ne '' } | Sort-Object -Descending LastAccessTime | Select-Object -First 1 -ExpandProperty ProcessName",
+            ])
+            .output()
+            .ok()?;
+        let s = String::from_utf8(output.stdout).ok()?;
+        let name = s.trim();
+        if name.is_empty() {
+            return None;
+        }
+        Some(name.to_string())
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Wayland compositors don't expose the focused surface to xdotool,
+        // so this call returns no useful data — bail out early and the
+        // App exclusion rule path becomes a no-op (logged in caller).
+        if crate::commands::app::is_wayland_session() {
+            return None;
+        }
+        let output = std::process::Command::new("xdotool")
+            .args(["getactivewindow", "getwindowname"])
+            .output()
+            .ok()?;
+        let s = String::from_utf8(output.stdout).ok()?;
+        if s.trim().is_empty() {
+            return None;
+        }
+        Some(s.trim().to_string())
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        None
     }
 }
 
@@ -170,6 +276,12 @@ fn encode_image(image: &arboard::ImageData) -> (Vec<u8>, String) {
 
 pub fn start_monitoring(app: AppHandle) {
     let mut clip_state = ClipboardState::new();
+    // Pull the user's exclusion rules into memory before the polling
+    // starts so the very first captured clipboard item can be filtered.
+    // Without this, freshly-added exclusions would silently miss up to
+    // 30s of captures — long enough to leak a password-manager entry
+    // the user just told us to ignore.
+    load_exclusion_rules(&app, &mut clip_state);
     let dedup_window = Duration::from_millis(100);
     let mut last_exclusion_load = Instant::now();
 
@@ -226,12 +338,30 @@ pub fn start_monitoring(app: AppHandle) {
                 continue;
             }
 
-            // Check exclusion rules (text content only).
-            let should_exclude = !content_str.is_empty()
-                && clip_state.exclusion_rules.iter().any(|(_, pattern)| {
-                    regex_lite::Regex::new(pattern).map_or(false, |re| re.is_match(content_str))
+            // Check exclusion rules. Each rule is matched against the most
+            // relevant target: Content rules against the captured text,
+            // App rules against the frontmost app's identifier (when the
+            // platform exposes one). On platforms without a frontmost-app
+            // probe (Wayland, etc.) App rules are skipped — not silently
+            // evaluated against an empty string.
+            let frontmost = frontmost_app_id();
+            let content_hit = !content_str.is_empty()
+                && clip_state.exclusion_rules.iter().any(|r| match r {
+                    ExclusionRule::Content(p) => {
+                        regex_lite::Regex::new(p).map_or(false, |re| re.is_match(content_str))
+                    }
+                    ExclusionRule::App(_) => false,
                 });
-            if should_exclude {
+            let app_hit = match &frontmost {
+                Some(app_id) => clip_state.exclusion_rules.iter().any(|r| match r {
+                    ExclusionRule::App(p) => {
+                        regex_lite::Regex::new(p).map_or(false, |re| re.is_match(app_id))
+                    }
+                    ExclusionRule::Content(_) => false,
+                }),
+                None => false,
+            };
+            if content_hit || app_hit {
                 continue;
             }
 
