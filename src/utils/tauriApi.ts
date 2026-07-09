@@ -42,7 +42,46 @@ export async function searchHistory(query: string): Promise<ClipboardItem[]> {
 
 let pasteInFlight = false
 
-export async function pasteItem(itemId: number) {
+// Cache the session type after the first lookup. The session doesn't
+// change for the life of the process and the command is cheap, but we
+// only need it once per mount of App.tsx so the cache avoids spamming
+// the IPC channel on every paste.
+let sessionTypeCache: SessionType | null = null
+
+export type SessionType =
+  | 'macos'
+  | 'windows'
+  | 'linux-x11'
+  | 'linux-wayland'
+  | 'linux-other'
+
+export async function getSessionType(): Promise<SessionType> {
+  if (sessionTypeCache) return sessionTypeCache
+  const raw = await invoke<string>('get_session_type')
+  const normalised: SessionType =
+    raw === 'macos' || raw === 'windows' ||
+    raw === 'linux-x11' || raw === 'linux-wayland' ||
+    raw === 'linux-other'
+      ? raw
+      : 'linux-other'
+  sessionTypeCache = normalised
+  return normalised
+}
+
+// Called by App.tsx when the host process is reused (HMR / dev) so the
+// cached value can be reset without a full reload.
+export function _resetSessionTypeCacheForTesting() {
+  sessionTypeCache = null
+}
+
+// Optional hook invoked just before the window hides on a paste. App.tsx
+// uses it to flash a "press Ctrl+V to paste" toast on Wayland sessions
+// where xdotool can't inject keystrokes and the user has to trigger
+// paste themselves. Resolves once the toast has been shown long enough
+// to read; the paste flow then proceeds to hide the window.
+export type BeforeHideHook = () => Promise<void> | void
+
+export async function pasteItem(itemId: number, beforeHide?: BeforeHideHook) {
   console.log('[pasteItem] called itemId=', itemId)
   if (!Number.isFinite(itemId) || itemId <= 0) {
     console.warn('[pasteItem] ignoring invalid itemId', itemId)
@@ -56,6 +95,9 @@ export async function pasteItem(itemId: number) {
   invoke('log_to_rust', { level: 'info', msg: `[pasteItem] ENTER itemId=${itemId}` }).catch(() => {})
   pasteInFlight = true
   try {
+    if (beforeHide) {
+      await beforeHide()
+    }
     try {
       await invoke('hide_window')
       console.log('[pasteItem] window hidden')

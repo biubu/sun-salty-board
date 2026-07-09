@@ -6,6 +6,7 @@ import SettingsPanel from './components/SettingsPanel'
 import { I18nContext, type Locale } from './utils/i18n'
 import type { ClipboardItem } from './types/clipboard'
 import * as api from './utils/tauriApi'
+import type { SessionType } from './utils/tauriApi'
 
 export type FilterType = 'all' | 'text' | 'richtext' | 'image' | 'files' | 'favorites'
 
@@ -18,12 +19,19 @@ export default function App() {
   const [activeFilter, setActiveFilter] = useState<FilterType>('all')
   const [selectedCategoryId, setSelectedCategoryId] = useState<number | null>(null)
   const [selectedIndex, setSelectedIndex] = useState(0)
+  const [sessionType, setSessionType] = useState<SessionType>('linux-other')
+  const [toast, setToast] = useState<string | null>(null)
   const [showSettings, setShowSettings] = useState(false)
   const { t, setLocale } = useContext(I18nContext)
   const selectedIndexRef = useRef(selectedIndex)
   selectedIndexRef.current = selectedIndex
   const debouncedQueryRef = useRef(debouncedQuery)
   debouncedQueryRef.current = debouncedQuery
+  // Mirror sessionType into a ref so the global keydown listener — which
+  // is registered exactly once with [] deps — always sees the latest
+  // value without us having to re-register on every IPC resolution.
+  const sessionTypeRef = useRef(sessionType)
+  sessionTypeRef.current = sessionType
 
   const refreshItems = useCallback(async (query?: string) => {
     const result = query ? await api.searchHistory(query) : await api.getHistory()
@@ -33,6 +41,37 @@ export default function App() {
   useEffect(() => {
     refreshItems()
   }, [refreshItems])
+
+  // One-time probe of the host session so we know whether we can
+  // synthesise keystrokes for paste (X11/macOS/Windows) or whether
+  // the user has to do Ctrl+V themselves (Wayland). Cached in the
+  // api module so subsequent calls are free.
+  useEffect(() => {
+    api.getSessionType().then(setSessionType).catch(() => {
+      // Default to the most pessimistic value; the toast path is
+      // harmless on platforms where it won't fire.
+      setSessionType('linux-other')
+    })
+  }, [])
+
+  // Shows the toast for ~1.4s — long enough to read, short enough
+  // that paste still feels snappy. The 50ms fade-in delay gives the
+  // CSS transition room to play without flashing. Reads sessionType
+  // through a ref so the global keydown listener (registered once with
+  // empty deps) always sees the resolved value.
+  const showWaylandToast = useCallback(async () => {
+    if (sessionTypeRef.current !== 'linux-wayland') return
+    setToast(t('toast.copied_manual_paste'))
+    await new Promise((r) => setTimeout(r, 1400))
+    setToast(null)
+  }, [t])
+
+  // Wraps api.pasteItem with the Wayland toast hook so the user
+  // sees "press Ctrl+V" before the window hides. On every other
+  // platform the hook is a no-op and the flow is unchanged.
+  const pasteItemWithToast = useCallback((itemId: number) => {
+    return api.pasteItem(itemId, showWaylandToast)
+  }, [showWaylandToast])
 
   useEffect(() => {
     api.getSettings().then((s) => {
@@ -103,10 +142,10 @@ export default function App() {
       if (e.key >= '1' && e.key <= '9') {
         const idx = parseInt(e.key, 10) - 1
         const item = filteredRef.current[idx]
-        if (item) api.pasteItem(item.id)
+        if (item) pasteItemWithToast(item.id)
       } else if (e.key === '0') {
         const item = filteredRef.current[9]
-        if (item) api.pasteItem(item.id)
+        if (item) pasteItemWithToast(item.id)
       } else if (e.key === 'ArrowUp') {
         e.preventDefault()
         setSelectedIndex((i) => (i > 0 ? i - 1 : filteredRef.current.length - 1))
@@ -116,7 +155,7 @@ export default function App() {
       } else if (e.key === 'Enter') {
         e.preventDefault()
         const item = filteredRef.current[selectedIndexRef.current]
-        if (item) api.pasteItem(item.id)
+        if (item) pasteItemWithToast(item.id)
       } else if (e.key === 'Escape') {
         api.hideWindow()
       }
@@ -157,7 +196,7 @@ export default function App() {
         <HistoryPanel
           items={filteredItems}
           selectedIndex={selectedIndex}
-          onSelect={(item) => api.pasteItem(item.id)}
+          onSelect={(item) => pasteItemWithToast(item.id)}
           onDelete={(id) => {
             api.deleteItem(id)
           }}
@@ -166,6 +205,11 @@ export default function App() {
           }}
         />
       </main>
+      {toast && (
+        <div className="toast" role="status" aria-live="polite">
+          {toast}
+        </div>
+      )}
     </div>
   )
 }

@@ -142,6 +142,7 @@ pub fn run() {
             commands::window::toggle_window,
             commands::app::get_version,
             commands::app::get_platform,
+            commands::app::get_session_type,
             commands::app::log_to_rust,
         ])
         .build(tauri::generate_context!())

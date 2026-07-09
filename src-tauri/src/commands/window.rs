@@ -34,6 +34,14 @@ pub fn get_cursor_position() -> Option<(i32, i32)> {
 
     #[cfg(target_os = "linux")]
     {
+        // xdotool can read the X11 cursor position but it cannot read
+        // a Wayland cursor — wlroots/Wayland compositors don't expose
+        // it. Detect Wayland up front and return None so callers fall
+        // back to the window's `center: true` config instead of trying
+        // to position at (0, 0), which would look broken to the user.
+        if crate::commands::app::is_wayland_session() {
+            return None;
+        }
         let output = Command::new("xdotool")
             .args(["getmouselocation", "--shell"])
             .output()

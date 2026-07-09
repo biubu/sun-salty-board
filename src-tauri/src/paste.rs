@@ -294,7 +294,25 @@ fn do_paste(_app: &tauri::AppHandle) -> Result<(), String> {
 
 #[cfg(target_os = "linux")]
 fn do_paste(_app: &tauri::AppHandle) -> Result<(), String> {
+    use crate::commands::app::is_wayland_session;
     use std::process::Command;
+
+    // On Wayland, xdotool cannot synthesise keystrokes targeted at other
+    // windows — the compositor blocks injection from any tool that isn't
+    // a trusted virtual-keyboard protocol client (which xdotool isn't).
+    // The clipboard has already been written by `paste_payload` above,
+    // so the user just needs to press Ctrl+V themselves. We surface this
+    // as an info log so the operator sees it in the journal, but we do
+    // NOT return an error: from the caller's perspective the paste
+    // "succeeded" — the data is on the clipboard and waiting.
+    if is_wayland_session() {
+        log::info!(
+            "[paste] Wayland session detected; skipping xdotool. \
+             Clipboard is set — user must press Ctrl+V to paste into the focused app."
+        );
+        return Ok(());
+    }
+
     let output = Command::new("xdotool")
         .args(["key", "--clearmodifiers", "ctrl+v"])
         .output()

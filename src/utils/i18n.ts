@@ -62,6 +62,7 @@ const translations: Record<Locale, Record<string, string>> = {
     'settings.update_error': 'Update check failed',
     'settings.update_progress': 'Downloading {p}%',
     'settings.update_section': 'Updates',
+    'toast.copied_manual_paste': 'Copied — press Ctrl+V to paste',
   },
   zh: {
     'search.placeholder': '搜索剪贴板历史...',
@@ -122,6 +123,7 @@ const translations: Record<Locale, Record<string, string>> = {
     'settings.update_error': '检查更新失败',
     'settings.update_progress': '下载中 {p}%',
     'settings.update_section': '更新',
+    'toast.copied_manual_paste': '已复制 — 按 Ctrl+V 粘贴',
   },
 }
 
